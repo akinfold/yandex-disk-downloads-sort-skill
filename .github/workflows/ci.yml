@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Byte-compile scripts
+        run: python -m compileall -q skills tests
+      - name: Validate rules JSON
+        run: python -c "import json; json.load(open('skills/yandex-disk-downloads-sort/assets/rules.default.json', encoding='utf-8'))"
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  openapi:
+    name: Validate GPT action schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install openapi-spec-validator pyyaml
+      - run: openapi-spec-validator chatgpt/openapi.yaml
+      - run: python tests/check_openapi_limits.py chatgpt/openapi.yaml

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Skill working files (inventory, plans, journals) if a workdir is placed inside the repo
+yandex-disk-downloads-sort-work/
+inventory.json
+plan.json
+report.md
+journal-*.jsonl
+
+# Packaged skill
+*.skill
+*.zip
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets — a token must never end up in the repository
+.env
+*.token
+token.txt

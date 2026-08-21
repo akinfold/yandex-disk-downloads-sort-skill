@@ -1,0 +1,19 @@
+{
+  "name": "akinfold-skills",
+  "owner": {
+    "name": "Roman Akinfeev",
+    "url": "https://github.com/akinfold"
+  },
+  "description": "Skills by akinfold: Yandex Disk Downloads sorting",
+  "plugins": [
+    {
+      "name": "yandex-disk-downloads-sort",
+      "source": "./",
+      "description": "Analyze and sort the Downloads folder on Yandex Disk through the REST API: inventory, duplicates, reviewable plan, safe moves, undo.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Roman Akinfeev"
+      }
+    }
+  ]
+}
