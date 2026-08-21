@@ -1,0 +1,286 @@
+openapi: 3.1.0
+info:
+  title: Yandex Disk (Downloads sorting)
+  version: "1.0.0"
+  description: >-
+    The subset of the Yandex Disk REST API needed to analyze and sort the Downloads folder:
+    read quota and system folders, list a folder page by page, create folders, move files,
+    and poll deferred operations. Deliberately excludes delete, upload and download. All paths
+    use the "disk:/Folder/file.ext" form. Folder listings are paginated with limit/offset and
+    _embedded.total.
+servers:
+  - url: https://cloud-api.yandex.net/v1
+paths:
+  /disk:
+    get:
+      operationId: getDiskInfo
+      x-openai-isConsequential: false
+      summary: Disk quota and the paths of system folders
+      description: >-
+        Returns total_space, used_space, trash_size and system_folders. Use
+        system_folders.downloads as the Downloads folder path (e.g. "disk:/Загрузки")
+        instead of guessing the name.
+      responses:
+        "200":
+          description: Disk information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Disk"
+        "401":
+          $ref: "#/components/responses/Error"
+  /disk/resources:
+    get:
+      operationId: listResource
+      x-openai-isConsequential: false
+      summary: Metadata of a file or folder; for a folder, one page of its children
+      description: >-
+        Folder children are in _embedded.items, the count in _embedded.total. Page with
+        limit=200 and offset=0,200,400,... until offset reaches the total. Use fields to
+        keep responses small.
+      parameters:
+        - $ref: "#/components/parameters/Path"
+        - name: limit
+          in: query
+          description: Number of children to return (use 200).
+          schema:
+            type: integer
+            default: 20
+            minimum: 0
+        - name: offset
+          in: query
+          description: Number of children to skip, for pagination.
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: sort
+          in: query
+          description: Sort children by name, path, created, modified or size; prefix with "-" for descending.
+          schema:
+            type: string
+            default: name
+        - name: fields
+          in: query
+          description: >-
+            Comma-separated fields to include. For folder listings use:
+            _embedded.items.name,_embedded.items.path,_embedded.items.type,_embedded.items.size,_embedded.items.media_type,_embedded.items.md5,_embedded.items.created,_embedded.items.modified,_embedded.total,_embedded.limit,_embedded.offset
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Resource metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: createFolder
+      x-openai-isConsequential: true
+      summary: Create a folder
+      description: >-
+        Creates one folder; the parent must exist, so create nested folders parent-first.
+        409 DiskPathPointsToExistentDirectoryError = already exists (treat as success);
+        409 DiskPathDoesntExistsError = parent missing.
+      parameters:
+        - $ref: "#/components/parameters/Path"
+      responses:
+        "201":
+          description: Folder created; the body is a link to its metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Link"
+        "409":
+          $ref: "#/components/responses/Error"
+  /disk/resources/move:
+    post:
+      operationId: moveResource
+      x-openai-isConsequential: true
+      summary: Move or rename a file or folder
+      description: >-
+        Moves "from" to "path". Always send overwrite=false; on 409
+        DiskResourceAlreadyExistsError retry with a " (2)" suffix before the extension.
+        201 = done. 202 = deferred: poll getOperationStatus with the id from the href.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Current path, e.g. "disk:/Загрузки/report.pdf".
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: true
+          description: New path including the file name, e.g. "disk:/Загрузки/Документы/report.pdf".
+          schema:
+            type: string
+        - name: overwrite
+          in: query
+          description: Must be false for sorting; true would replace an existing file.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "201":
+          description: Moved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Link"
+        "202":
+          description: Deferred; poll the href
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Link"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /disk/operations:
+    get:
+      operationId: getOperationStatus
+      x-openai-isConsequential: false
+      summary: Status of a deferred operation
+      description: >-
+        For a 202 response, take the value of the "id" query parameter from the returned href
+        (…/operations?id=XXXX) and pass it here. status is in-progress, success or failed; poll
+        about once per second until it is no longer in-progress.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: Operation id from the href of a 202 response.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Operation status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [in-progress, success, failed]
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    Path:
+      name: path
+      in: query
+      required: true
+      description: Resource path in the "disk:/Folder/name" form (Cyrillic is fine).
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Error envelope; "description" is English, "message" is localized
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Link:
+      type: object
+      properties:
+        href:
+          type: string
+        method:
+          type: string
+        templated:
+          type: boolean
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable code, e.g. DiskResourceAlreadyExistsError
+        description:
+          type: string
+        message:
+          type: string
+    Disk:
+      type: object
+      properties:
+        total_space:
+          type: integer
+        used_space:
+          type: integer
+        trash_size:
+          type: integer
+        system_folders:
+          type: object
+          additionalProperties:
+            type: string
+          description: Keys like downloads, applications, photostream, screenshots, social; values are disk:/ paths
+    Resource:
+      type: object
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        type:
+          type: string
+          enum: [file, dir]
+        size:
+          type: integer
+        media_type:
+          type: string
+          description: Yandex-computed type such as image, video, audio, document, compressed, executable, diskimage, book, font, unknown
+        mime_type:
+          type: string
+        md5:
+          type: string
+        sha256:
+          type: string
+        created:
+          type: string
+          format: date-time
+        modified:
+          type: string
+          format: date-time
+        _embedded:
+          type: object
+          description: Present for folders only
+          properties:
+            total:
+              type: integer
+            limit:
+              type: integer
+            offset:
+              type: integer
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ResourceSummary"
+    ResourceSummary:
+      type: object
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        type:
+          type: string
+          enum: [file, dir]
+        size:
+          type: integer
+        media_type:
+          type: string
+        mime_type:
+          type: string
+        md5:
+          type: string
+        created:
+          type: string
+          format: date-time
+        modified:
+          type: string
+          format: date-time

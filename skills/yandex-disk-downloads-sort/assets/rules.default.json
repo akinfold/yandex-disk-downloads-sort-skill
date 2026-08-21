@@ -1,0 +1,498 @@
+{
+  "version": 1,
+  "_comment": "Default sorting rules. Copy this file, edit it, and pass --rules <file> to downloads_sort.py. Category ids are stable; folder names are per language. Extensions are lower-case without the dot; multi-part ones like tar.gz are matched before the last segment. Earlier categories win when a file matches several.",
+  "categories": [
+    {
+      "id": "screenshots",
+      "folder": {
+        "en": "Screenshots",
+        "ru": "Скриншоты"
+      },
+      "requires_extensions_of": "images",
+      "name_regex": [
+        "^(screen ?shot|screencapture|screen capture|cleanshot|снимок экрана|скриншот|bildschirmfoto|capture d.écran|captura de pantalla)[ _\\-(]",
+        "^screenshot_?\\d",
+        "^(снимок экрана|screenshot|screen shot) \\d{4}-\\d{2}-\\d{2}",
+        "^(снимок экрана|screenshot) \\(\\d+\\)"
+      ]
+    },
+    {
+      "id": "images",
+      "folder": {
+        "en": "Images",
+        "ru": "Изображения"
+      },
+      "extensions": [
+        "jpg",
+        "jpeg",
+        "jpe",
+        "png",
+        "gif",
+        "bmp",
+        "tif",
+        "tiff",
+        "webp",
+        "heic",
+        "heif",
+        "avif",
+        "svg",
+        "ico",
+        "psd",
+        "ai",
+        "eps",
+        "raw",
+        "cr2",
+        "cr3",
+        "nef",
+        "arw",
+        "dng",
+        "orf",
+        "rw2",
+        "raf",
+        "sketch",
+        "fig",
+        "xcf"
+      ]
+    },
+    {
+      "id": "documents",
+      "folder": {
+        "en": "Documents",
+        "ru": "Документы"
+      },
+      "extensions": [
+        "pdf",
+        "doc",
+        "docx",
+        "docm",
+        "dot",
+        "dotx",
+        "odt",
+        "rtf",
+        "txt",
+        "md",
+        "markdown",
+        "pages",
+        "tex",
+        "wpd",
+        "xps",
+        "oxps",
+        "eml",
+        "msg",
+        "vcf",
+        "ics"
+      ]
+    },
+    {
+      "id": "spreadsheets",
+      "folder": {
+        "en": "Spreadsheets",
+        "ru": "Таблицы"
+      },
+      "extensions": [
+        "xls",
+        "xlsx",
+        "xlsm",
+        "xlsb",
+        "ods",
+        "csv",
+        "tsv",
+        "numbers"
+      ]
+    },
+    {
+      "id": "presentations",
+      "folder": {
+        "en": "Presentations",
+        "ru": "Презентации"
+      },
+      "extensions": [
+        "ppt",
+        "pptx",
+        "pps",
+        "ppsx",
+        "pptm",
+        "odp",
+        "key"
+      ]
+    },
+    {
+      "id": "books",
+      "folder": {
+        "en": "Books",
+        "ru": "Книги"
+      },
+      "extensions": [
+        "epub",
+        "mobi",
+        "azw",
+        "azw3",
+        "kf8",
+        "fb2",
+        "fb2.zip",
+        "djvu",
+        "djv",
+        "cbz",
+        "cbr",
+        "ibooks"
+      ]
+    },
+    {
+      "id": "videos",
+      "folder": {
+        "en": "Videos",
+        "ru": "Видео"
+      },
+      "extensions": [
+        "mp4",
+        "m4v",
+        "mkv",
+        "mov",
+        "avi",
+        "wmv",
+        "flv",
+        "webm",
+        "mpg",
+        "mpeg",
+        "mpe",
+        "ts",
+        "m2ts",
+        "mts",
+        "3gp",
+        "3g2",
+        "vob",
+        "ogv"
+      ]
+    },
+    {
+      "id": "audio",
+      "folder": {
+        "en": "Audio",
+        "ru": "Аудио"
+      },
+      "extensions": [
+        "mp3",
+        "wav",
+        "flac",
+        "m4a",
+        "aac",
+        "ogg",
+        "oga",
+        "opus",
+        "wma",
+        "aiff",
+        "aif",
+        "alac",
+        "ape",
+        "mid",
+        "midi",
+        "amr",
+        "m4b"
+      ]
+    },
+    {
+      "id": "archives",
+      "folder": {
+        "en": "Archives",
+        "ru": "Архивы"
+      },
+      "extensions": [
+        "zip",
+        "rar",
+        "7z",
+        "tar",
+        "gz",
+        "tgz",
+        "bz2",
+        "tbz",
+        "tbz2",
+        "xz",
+        "txz",
+        "zst",
+        "tzst",
+        "lz",
+        "lzma",
+        "cab",
+        "arj",
+        "z",
+        "tar.gz",
+        "tar.bz2",
+        "tar.xz",
+        "tar.zst"
+      ]
+    },
+    {
+      "id": "installers",
+      "folder": {
+        "en": "Installers",
+        "ru": "Установщики"
+      },
+      "extensions": [
+        "dmg",
+        "pkg",
+        "mpkg",
+        "exe",
+        "msi",
+        "msix",
+        "msixbundle",
+        "appx",
+        "appxbundle",
+        "apk",
+        "aab",
+        "ipa",
+        "deb",
+        "rpm",
+        "appimage",
+        "snap",
+        "flatpak",
+        "run",
+        "xpi",
+        "crx",
+        "xapk"
+      ]
+    },
+    {
+      "id": "disk-images",
+      "folder": {
+        "en": "Disk images",
+        "ru": "Образы дисков"
+      },
+      "extensions": [
+        "iso",
+        "img",
+        "vhd",
+        "vhdx",
+        "vmdk",
+        "vdi",
+        "ova",
+        "ovf",
+        "qcow2",
+        "dsk",
+        "toast",
+        "cue"
+      ]
+    },
+    {
+      "id": "code",
+      "folder": {
+        "en": "Code and data",
+        "ru": "Код и данные"
+      },
+      "extensions": [
+        "py",
+        "ipynb",
+        "js",
+        "mjs",
+        "ts",
+        "tsx",
+        "jsx",
+        "json",
+        "jsonl",
+        "xml",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "sql",
+        "sh",
+        "bash",
+        "zsh",
+        "ps1",
+        "bat",
+        "cmd",
+        "html",
+        "htm",
+        "css",
+        "scss",
+        "c",
+        "h",
+        "cpp",
+        "hpp",
+        "cs",
+        "java",
+        "kt",
+        "go",
+        "rs",
+        "rb",
+        "php",
+        "swift",
+        "scala",
+        "lua",
+        "pl",
+        "r",
+        "dart",
+        "parquet",
+        "sqlite",
+        "db",
+        "db3",
+        "log",
+        "har",
+        "reg",
+        "plist"
+      ]
+    },
+    {
+      "id": "fonts",
+      "folder": {
+        "en": "Fonts",
+        "ru": "Шрифты"
+      },
+      "extensions": [
+        "ttf",
+        "otf",
+        "ttc",
+        "woff",
+        "woff2",
+        "eot",
+        "pfb",
+        "pfa"
+      ]
+    },
+    {
+      "id": "torrents",
+      "folder": {
+        "en": "Torrents",
+        "ru": "Торренты"
+      },
+      "extensions": [
+        "torrent"
+      ]
+    },
+    {
+      "id": "certificates",
+      "folder": {
+        "en": "Certificates and keys",
+        "ru": "Сертификаты и ключи"
+      },
+      "sensitive": true,
+      "extensions": [
+        "pem",
+        "crt",
+        "cer",
+        "der",
+        "p12",
+        "pfx",
+        "key",
+        "csr",
+        "ovpn",
+        "p7b",
+        "ppk",
+        "mobileconfig",
+        "kdbx",
+        "kdb",
+        "asc",
+        "gpg",
+        "pgp",
+        "jks",
+        "keystore",
+        "p8"
+      ]
+    },
+    {
+      "id": "other",
+      "folder": {
+        "en": "Other",
+        "ru": "Прочее"
+      },
+      "extensions": []
+    }
+  ],
+  "name_rules": [
+    {
+      "id": "finance",
+      "enabled": true,
+      "applies_to": [
+        "documents",
+        "spreadsheets",
+        "images"
+      ],
+      "folder": {
+        "en": "Documents/Finance",
+        "ru": "Документы/Финансы"
+      },
+      "regex": "(?i)(^|[^a-zа-яё])(invoices?|receipts?|(bank|account|card)[ _-]?statements?|purchase[ _-]?orders?|contracts?|agreements?|сч[её]т(а|ов|у|е|ами|ах)?|квитанци[яиюе]й?|чек(и|а|ов|ам)?(?![ -]?лист)|выписк[аиуе]|акт(ы|а|ов|е)?|договор(ы|а|ов|у|е)?|оплат[аыуе]|плат[её]ж(и|а|ей|н[а-яё]*|к[а-яё]*)?|налог(и|а|ов|ов[а-яё]+)?|справк[аиуе])($|[^a-zа-яё])"
+    },
+    {
+      "id": "private-key",
+      "enabled": true,
+      "applies_to": [
+        "presentations",
+        "other"
+      ],
+      "category": "certificates",
+      "regex": "(?i)^(?=.*(?:^|[^a-z])(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|privkey|private|secret|ssl|tls|cert)(?:[^a-z]|$))(?:[^.]+|.*\\.key)$"
+    }
+  ],
+  "media_type_fallback": {
+    "image": "images",
+    "video": "videos",
+    "audio": "audio",
+    "compressed": "archives",
+    "backup": "archives",
+    "document": "documents",
+    "text": "documents",
+    "spreadsheet": "spreadsheets",
+    "book": "books",
+    "executable": "installers",
+    "diskimage": "disk-images",
+    "font": "fonts",
+    "development": "code",
+    "data": "code",
+    "web": "code",
+    "settings": "code",
+    "encoded": "other",
+    "flash": "other",
+    "unknown": "other"
+  },
+  "ambiguous_extensions": {
+    "_comment": "Extensions with two common meanings. When Yandex reports one of the listed media_type values, that category wins; otherwise the extension's default category applies.",
+    "ts": {
+      "video": "videos",
+      "development": "code",
+      "text": "code"
+    },
+    "img": {
+      "image": "images",
+      "diskimage": "disk-images"
+    },
+    "key": {
+      "document": "presentations",
+      "encoded": "certificates",
+      "web": "certificates",
+      "text": "certificates"
+    }
+  },
+  "skip": {
+    "_comment": "Files that must never be moved: partial downloads still being written, editor lock files, OS metadata.",
+    "extensions": [
+      "crdownload",
+      "part",
+      "partial",
+      "download",
+      "tmp",
+      "temp",
+      "aria2",
+      "!qb",
+      "!ut",
+      "bc!",
+      "opdownload",
+      "dctmp",
+      "td",
+      "dtapart"
+    ],
+    "name_regex": [
+      "^~\\$",
+      "^\\.",
+      "^desktop\\.ini$",
+      "^thumbs\\.db$"
+    ]
+  },
+  "special_folders": {
+    "duplicates": {
+      "en": "_Duplicates",
+      "ru": "_Дубликаты"
+    }
+  }
+}
