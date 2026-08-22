@@ -16,6 +16,22 @@ exact duplicates; partial downloads; keys and certificates; largest and oldest f
 a plan of moves into category folders, executes it only after you confirm, and keeps a
 journal so the whole thing can be undone.
 
+## Install
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/akinfold/yandex-disk-downloads-sort-skill/HEAD/install.sh)"
+```
+
+The installer clones this repository into `~/.local/share/`, links the skill where Claude Code,
+Codex, Cursor and other Agent Skills clients look for it, walks you through getting a Yandex
+Disk OAuth token, and saves that token to `~/.yandex-disk-token` with owner-only permissions.
+It uses no `sudo`, touches nothing outside your home directory, and can be re-run to update.
+
+Then ask your agent: *"What's in my Downloads folder on Yandex Disk?"*
+
+Prefer to look before you run it? Read [install.sh](install.sh) — that URL serves exactly this
+file — or follow [the manual steps](#1-get-a-yandex-disk-oauth-token) instead.
+
 ## What it does, and what it never does
 
 - Finds the real Downloads folder through the API (`disk:/Загрузки`, `disk:/Downloads`, …),
@@ -44,12 +60,16 @@ skills/yandex-disk-downloads-sort/   the skill (Agent Skills format: SKILL.md + 
   references/oauth-token.md          how to get a token (Poligon or your own app)
   references/yandex-disk-api.md      API cheat sheet and curl recipes
   references/sorting-rules.md        how classification works, how to write your own rules
+install.sh                           one-line installer (clone, link, ask for the token, wire settings)
 chatgpt/                             Custom GPT: openapi.yaml (action) + instructions.md + README
 tests/                               unit and end-to-end tests against an in-memory fake of the API
 .claude-plugin/, .codex-plugin/      plugin manifests (+ marketplace catalog) for Claude Code and Codex/ChatGPT
 ```
 
 ## 1. Get a Yandex Disk OAuth token
+
+> The [one-line installer](#install) does everything in this section and the next one for you.
+> Read on if you would rather do it by hand, or if you want the details.
 
 The scripts talk to the Yandex Disk REST API with your own OAuth token, sent as
 `Authorization: OAuth <token>`. Nothing is proxied through a third party. Two ways to get one;
@@ -135,6 +155,8 @@ The longer guide (device flow, refresh tokens, error table) is in
 [references/oauth-token.md](skills/yandex-disk-downloads-sort/references/oauth-token.md).
 
 ## 2. Install the skill
+
+> Again: the [one-line installer](#install) does all of this. These are the manual equivalents.
 
 Everything lives in one folder, `skills/yandex-disk-downloads-sort`. Clone the repository once,
 then point your tool at that folder — all of these tools follow symlinks, so one checkout can

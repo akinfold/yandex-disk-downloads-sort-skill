@@ -25,6 +25,34 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
+  installer:
+    name: Installer script
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n install.sh
+      - name: ShellCheck
+        run: shellcheck -s bash install.sh
+      - name: Install into a throwaway HOME, non-interactively
+        run: |
+          mkdir -p "${RUNNER_TEMP}/fakehome"
+          env -i HOME="${RUNNER_TEMP}/fakehome" PATH="$PATH" NONINTERACTIVE=1 \
+            bash install.sh --no-token < /dev/null
+          test -f "${RUNNER_TEMP}/fakehome/.local/share/yandex-disk-downloads-sort-skill/skills/yandex-disk-downloads-sort/SKILL.md"
+          test -L "${RUNNER_TEMP}/fakehome/.claude/skills/yandex-disk-downloads-sort"
+          test -L "${RUNNER_TEMP}/fakehome/.agents/skills/yandex-disk-downloads-sort"
+          python3 -c "import json,os,sys; s=json.load(open(os.environ['RUNNER_TEMP']+'/fakehome/.claude/settings.json')); sys.exit(0 if s['env']['YANDEX_DISK_TOKEN_FILE'].endswith('.yandex-disk-token') else 1)"
+      - name: Re-run is idempotent and writes a token file with mode 600
+        run: |
+          env -i HOME="${RUNNER_TEMP}/fakehome" PATH="$PATH" NONINTERACTIVE=1 \
+            YANDEX_DISK_TOKEN=y0_not_a_real_token bash install.sh < /dev/null
+          test "$(stat -f '%Lp' "${RUNNER_TEMP}/fakehome/.yandex-disk-token" 2>/dev/null || stat -c '%a' "${RUNNER_TEMP}/fakehome/.yandex-disk-token")" = "600"
+
   openapi:
     name: Validate GPT action schema
     runs-on: ubuntu-latest

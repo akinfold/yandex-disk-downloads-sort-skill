@@ -3,6 +3,10 @@
 The scripts authenticate with a personal OAuth token sent as `Authorization: OAuth <token>`.
 There are two ways to get one. Option A takes about two minutes and needs no registration.
 
+> The repository's [one-line installer](../../../install.sh) walks through Option A
+> interactively, checks the token against the API and writes it to `~/.yandex-disk-token`
+> with the right permissions. Everything below is the same thing done by hand.
+
 ## Option A: the Poligon page (quickest)
 
 Poligon (https://yandex.ru/dev/disk/poligon/, English mirror https://yandex.com/dev/disk/poligon/)
