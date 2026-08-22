@@ -59,6 +59,22 @@ class TokenTests(unittest.TestCase):
         os.environ["YANDEX_DISK_TOKEN_FILE"] = handle.name
         self.assertEqual(api.load_token(), "from-file")
 
+    def test_named_token_file_reports_its_own_problems(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".token") as handle:
+            handle.write("")
+        os.environ["YANDEX_DISK_TOKEN_FILE"] = handle.name
+        with self.assertRaises(api.TokenMissing) as ctx:
+            api.load_token()
+        self.assertIn("is empty", str(ctx.exception))
+        self.assertIn(handle.name, str(ctx.exception))
+        os.environ["YANDEX_DISK_TOKEN_FILE"] = "/nonexistent/token/file"
+        with self.assertRaises(api.TokenMissing) as ctx:
+            api.load_token()
+        self.assertIn("does not exist", str(ctx.exception))
+        # an env var still wins over the file named by YANDEX_DISK_TOKEN_FILE
+        os.environ["YANDEX_DISK_TOKEN"] = "y0_from_env"
+        self.assertEqual(api.load_token(), "y0_from_env")
+
     def test_token_files_with_boms_and_bad_values(self):
         with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".token") as handle:
             handle.write("y0_bom_token\n".encode("utf-8-sig"))

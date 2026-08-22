@@ -132,10 +132,19 @@ def load_token(token_file: Optional[str] = None) -> str:
         if value:
             return value
     named = os.environ.get(TOKEN_FILE_ENV, "").strip()
-    if named and os.path.isfile(os.path.expanduser(named)):
-        value = _clean_token(_read_token_file(os.path.expanduser(named)), f"${TOKEN_FILE_ENV}")
-        if value:
-            return value
+    if named:
+        # The variable is set on purpose, so a missing or empty file is a mistake worth
+        # naming rather than a fall-through to "no token anywhere".
+        path = os.path.expanduser(named)
+        if not os.path.isfile(path):
+            raise TokenMissing(f"${TOKEN_FILE_ENV} points at {named}, which does not exist.")
+        value = _clean_token(_read_token_file(path), f"${TOKEN_FILE_ENV}")
+        if not value:
+            raise TokenMissing(
+                f"The token file {named} is empty. Paste your OAuth token into it "
+                "(see references/oauth-token.md) and try again."
+            )
+        return value
     raise TokenMissing(
         "No Yandex Disk OAuth token found. Set YANDEX_DISK_TOKEN (or YANDEX_DISK_OAUTH_TOKEN), "
         "or pass --token-file. See references/oauth-token.md for how to get one."
