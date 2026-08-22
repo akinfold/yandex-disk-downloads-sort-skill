@@ -24,7 +24,9 @@ journal so the whole thing can be undone.
 
 The installer:
 
-- clones this repository into `~/.local/share/yandex-disk-downloads-sort-skill`;
+- downloads the latest [release](https://github.com/akinfold/yandex-disk-downloads-sort-skill/releases)
+  archive into `~/.local/share/yandex-disk-downloads-sort` and checks it against the SHA-256
+  published beside it — no git needed, so nothing prompts you to install Xcode tooling;
 - links the skill into `~/.claude/skills` and `~/.agents/skills`, where Claude Code, Codex,
   Cursor and other Agent Skills clients look for it;
 - explains how to get a Yandex Disk OAuth token, reads it without echoing it, checks it against
@@ -34,7 +36,8 @@ The installer:
   leaving your other settings untouched), so Claude Code finds the token by itself.
 
 No `sudo`; everything lands in your home directory apart from one short-lived temp file used
-to check the token. Re-run it to update. Options go after an empty argument, which `bash`
+to check the token. Re-run it to update — it always fetches the newest release, and
+`YADISK_VERSION=v1.0.0` pins an older one. Options go after an empty argument, which `bash`
 assigns to `$0`: `... install.sh)" '' --no-token`, and `--help` lists them.
 
 Then ask your agent: *"What's in my Downloads folder on Yandex Disk?"*
@@ -70,7 +73,7 @@ skills/yandex-disk-downloads-sort/   the skill (Agent Skills format: SKILL.md + 
   references/oauth-token.md          how to get a token (Poligon or your own app)
   references/yandex-disk-api.md      API cheat sheet and curl recipes
   references/sorting-rules.md        how classification works, how to write your own rules
-install.sh                           one-line installer (clone, link, ask for the token, wire settings)
+install.sh                           one-line installer (download release, link, ask for the token, wire settings)
 chatgpt/                             Custom GPT: openapi.yaml (action) + instructions.md + README
 tests/                               unit and end-to-end tests against an in-memory fake of the API
 .claude-plugin/, .codex-plugin/      plugin manifests (+ marketplace catalog) for Claude Code and Codex/ChatGPT
@@ -168,14 +171,28 @@ The longer guide (device flow, refresh tokens, error table) is in
 
 > Again: the [one-line installer](#install) does all of this. These are the manual equivalents.
 
-Everything lives in one folder, `skills/yandex-disk-downloads-sort`. Clone the repository once,
-then point your tool at that folder — all of these tools follow symlinks, so one checkout can
-serve every one of them:
+Everything lives in one folder, `skills/yandex-disk-downloads-sort`. Get that folder once, then
+point your tool at it — all of these tools follow symlinks, so one copy serves every one of them.
+
+From the latest release (what the installer does):
+
+```bash
+mkdir -p ~/.local/share/yandex-disk-downloads-sort && cd $_
+curl -fsSLO https://github.com/akinfold/yandex-disk-downloads-sort-skill/releases/latest/download/yandex-disk-downloads-sort.tar.gz
+curl -fsSLO https://github.com/akinfold/yandex-disk-downloads-sort-skill/releases/latest/download/yandex-disk-downloads-sort.tar.gz.sha256
+shasum -a 256 -c yandex-disk-downloads-sort.tar.gz.sha256   # sha256sum -c on Linux
+tar -xzf yandex-disk-downloads-sort.tar.gz
+```
+
+Or from a clone, if you want the tests and the ChatGPT package too:
 
 ```bash
 git clone https://github.com/akinfold/yandex-disk-downloads-sort-skill.git
 cd yandex-disk-downloads-sort-skill
 ```
+
+The paths below assume the clone; from the release archive the skill folder is
+`~/.local/share/yandex-disk-downloads-sort/yandex-disk-downloads-sort`.
 
 **Claude Code** — as a personal skill:
 
@@ -204,7 +221,9 @@ ln -s "$PWD/skills/yandex-disk-downloads-sort" ~/.agents/skills/yandex-disk-down
 Project-scoped installs work too: copy or symlink the folder into `.claude/skills/` or
 `.agents/skills/` inside the project.
 
-**Claude.ai / Claude Cowork** — upload a zip whose root is the skill folder:
+**Claude.ai / Claude Cowork** — every release ships a ready zip whose root is the skill folder,
+[`yandex-disk-downloads-sort.zip`](https://github.com/akinfold/yandex-disk-downloads-sort-skill/releases/latest/download/yandex-disk-downloads-sort.zip).
+From a clone you can build the same thing:
 
 ```bash
 cd skills && zip -r ../yandex-disk-downloads-sort.zip yandex-disk-downloads-sort && cd ..
@@ -275,6 +294,11 @@ Disk account (create folders, move, rename on clash, deferred operations, undo).
 
 Contributions are welcome: new screenshot patterns, extensions and folder-name translations
 belong in `assets/rules.default.json`; protocol quirks in `references/yandex-disk-api.md`.
+
+To cut a release, bump `metadata.version` in `SKILL.md` and push a matching tag
+(`git tag -a v1.1.0 -m ... && git push origin v1.1.0`). The release workflow refuses to publish
+if the two disagree, runs the tests, and attaches the tarball, its SHA-256 and the claude.ai
+zip. The installer picks up the new release on its next run.
 
 ## License
 
