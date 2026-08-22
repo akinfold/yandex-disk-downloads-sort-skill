@@ -33,6 +33,19 @@ if [ -n "${POSIXLY_CORRECT+1}" ]; then
   abort "Bash is in POSIX mode. Unset POSIXLY_CORRECT and try again."
 fi
 
+# Any temp file that touches the token is registered here and removed however the script
+# ends — normally, on error, or on Ctrl-C.
+TMPFILES=()
+cleanup() {
+  # bash 3.2 treats "${empty[@]}" as an unbound variable under `set -u`, so check first.
+  [ "${#TMPFILES[@]}" -gt 0 ] || return 0
+  rm -f "${TMPFILES[@]}"
+  TMPFILES=()
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
 # The whole installer lives in main(), invoked on the last line. If the download is cut
 # short, bash never reaches that line, so a partial script cannot half-install anything.
 main() {
@@ -51,6 +64,8 @@ main() {
 
   setup_output
   parse_args "$@"
+  SKILL_DIR=$(absolute_path "${SKILL_DIR}")
+  TOKEN_FILE=$(absolute_path "${TOKEN_FILE}")
 
   cat <<EOF
 
@@ -62,7 +77,8 @@ main() {
     3. ask you for a Yandex Disk OAuth token and save it to ${TOKEN_FILE} (mode 600)
     4. point Claude Code at that file via ~/.claude/settings.json
 
-  It needs no sudo, touches nothing outside your home directory, and is safe to re-run.
+  It needs no sudo, writes only inside your home directory (plus one short-lived temp file
+  while it checks the token), and is safe to re-run.
 
 EOF
 
@@ -101,6 +117,12 @@ Usage: install.sh [--help] [--no-token] [--no-settings] [--dir PATH]
   --no-settings   do not add YANDEX_DISK_TOKEN_FILE to ~/.claude/settings.json
   --dir PATH      keep the checkout at PATH (default ~/.local/share/yandex-disk-downloads-sort-skill)
 
+Environment: YANDEX_DISK_TOKEN, YADISK_TOKEN_FILE, YADISK_SKILL_DIR, NONINTERACTIVE=1
+
+Through the one-liner, options go after an empty argument, which bash assigns to \$0:
+
+  /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/HEAD/install.sh)" '' --no-token
+
 See https://github.com/${REPO_SLUG} for what the skill does.
 EOF
 }
@@ -121,6 +143,16 @@ parse_args() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Symlinks are resolved from the directory that holds them, so a relative target would
+# dangle once it is written into ~/.claude/skills.
+absolute_path() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    ~/*) printf '%s' "${HOME}/${1#~/}" ;;
+    *) printf '%s' "${PWD}/$1" ;;
+  esac
+}
 
 # -- prerequisites ------------------------------------------------------------
 
@@ -288,8 +320,17 @@ install_token() {
   info "got $(mask_token "${token}")"
   check_token_shape "${token}"
 
-  verify_token "${token}"
-  write_token "${token}"
+  if verify_token "${token}"; then
+    write_token "${token}"
+  elif [ -s "${TOKEN_FILE}" ]; then
+    # Replacing a token that works with one the server just refused would be a downgrade.
+    warn "keeping the token already in ${TOKEN_FILE}; the new one was not accepted"
+    info "to force it anyway: printf '%s' 'y0_...' > ${TOKEN_FILE}"
+  else
+    write_token "${token}"
+    info "saved anyway — fix or replace it later if Yandex keeps refusing it"
+  fi
+  unset token
 }
 
 # /dev/tty can exist with the right permissions and still fail to open when the process
@@ -329,18 +370,29 @@ can_prompt() {
 verify_token() {
   t="$1"
   info "checking the token against ${API_URL}"
-  headers=$(mktemp) || { warn "cannot create a temp file; skipping the check"; return 0; }
+  # The token reaches curl through a file, not on its command line, where any user on the
+  # machine could read it out of `ps`.
+  headers=$(mktemp "${TMPDIR:-/tmp}/yadisk-install.XXXXXXXX") || {
+    warn "cannot create a temp file; skipping the check"
+    return 0
+  }
+  TMPFILES+=("${headers}")
   chmod 600 "${headers}" 2>/dev/null
   printf 'header = "Authorization: OAuth %s"\n' "${t}" > "${headers}"
 
   body=$(curl -fsS --max-time 20 --config "${headers}" "${API_URL}" 2>/dev/null)
   status=$?
-  rm -f "${headers}"
+  cleanup
 
   if [ "${status}" -ne 0 ]; then
-    warn "Yandex did not accept the token (or the network is down). It will be saved anyway."
-    info "a 401 means the token is wrong, expired or revoked — get a fresh one at ${POLIGON_URL}"
-    return 0
+    # curl exits 22 for an HTTP error (with -f) and 6/7/28/35 for DNS, connection and TLS
+    # trouble — worth telling apart, because the remedies are nothing alike.
+    case "${status}" in
+      22) warn "Yandex refused the token: it is wrong, expired or revoked. Get a fresh one at ${POLIGON_URL}" ;;
+      6|7|28|35) warn "could not reach ${API_URL} (exit ${status}); the token itself was not checked" ;;
+      *) warn "the token check failed (curl exit ${status}); the token itself may still be fine" ;;
+    esac
+    return 1
   fi
 
   login=$(printf '%s' "${body}" | extract_json_field "login")
@@ -350,6 +402,7 @@ verify_token() {
   else
     ok "token works"
   fi
+  return 0
 }
 
 extract_json_field() {
@@ -411,9 +464,10 @@ wire_settings() {
 
   if have python3 && python3 -c 'import json' >/dev/null 2>&1; then
     if python3 - "${SETTINGS_FILE}" "${TOKEN_FILE}" <<'PY'
-import json, os, shutil, sys, tempfile, time
+import json, os, shutil, stat, sys, tempfile, time
 
 path, token_file = sys.argv[1], sys.argv[2]
+path = os.path.realpath(path)  # write through a symlink, never replace it
 try:
     with open(path, encoding="utf-8") as handle:
         settings = json.load(handle)
@@ -439,6 +493,8 @@ try:
     json.dump(settings, handle, ensure_ascii=False, indent=2)
     handle.write("\n")
     handle.close()
+    # NamedTemporaryFile is 0600; carry over whatever mode the user had on the original.
+    os.chmod(handle.name, stat.S_IMODE(os.stat(path).st_mode))
     os.replace(handle.name, path)
 except BaseException:
     os.unlink(handle.name)
@@ -458,8 +514,9 @@ PY
       return 0
     fi
     tmp="${SETTINGS_FILE}.tmp.$$"
-    if jq --arg f "${TOKEN_FILE}" '.env = ((.env // {}) + {YANDEX_DISK_TOKEN_FILE: $f})' \
-        "${SETTINGS_FILE}" > "${tmp}" 2>/dev/null; then
+    if ( umask 077; jq --arg f "${TOKEN_FILE}" '.env = ((.env // {}) + {YANDEX_DISK_TOKEN_FILE: $f})' \
+        "${SETTINGS_FILE}" > "${tmp}" ) 2>/dev/null; then
+      copy_mode "${SETTINGS_FILE}" "${tmp}"
       cp -p "${SETTINGS_FILE}" "${SETTINGS_FILE}.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null
       mv "${tmp}" "${SETTINGS_FILE}" && ok "added env.YANDEX_DISK_TOKEN_FILE to ${SETTINGS_FILE}"
     else
@@ -471,6 +528,11 @@ PY
     warn "neither python3 nor jq is available to edit ${SETTINGS_FILE}"
     print_settings_snippet
   fi
+}
+
+copy_mode() {
+  mode=$(file_mode "$1")
+  [ -n "${mode}" ] && chmod "${mode}" "$2" 2>/dev/null
 }
 
 print_settings_snippet() {
@@ -494,16 +556,23 @@ print_next_steps() {
 
   ${GREEN}${BOLD}Done.${RESET}
 
-  Try it — in Claude Code, Codex or another Agent Skills client, ask:
+  In ${BOLD}Claude Code${RESET} the token is wired up already — just ask:
 
       ${BOLD}"What's in my Downloads folder on Yandex Disk?"${RESET}
 
-  or run the scripts directly:
+  In ${BOLD}Codex, Cursor${RESET} and other clients, put this in your shell profile first, so their
+  scripts can find the token:
 
-      python3 ${SKILL_SOURCE}/scripts/downloads_sort.py check
+      export YANDEX_DISK_TOKEN_FILE="${TOKEN_FILE}"
 
-  The skill never deletes or overwrites anything: it shows you a plan first, moves files
-  only after you say yes, and keeps a journal so every move can be undone.
+  To run it yourself, from any shell:
+
+      YANDEX_DISK_TOKEN_FILE="${TOKEN_FILE}" python3 ${SKILL_SOURCE}/scripts/downloads_sort.py check
+
+  The skill shows you a plan before it touches anything, moves files only after you agree,
+  never overwrites a file, and journals every move so it can be undone. It deletes nothing —
+  the one exception is "undo --remove-empty-folders", which sends folders it created itself,
+  and only if they are empty, to the Disk's trash.
 
   Docs:   https://github.com/${REPO_SLUG}
   Update: re-run this installer, or git -C ${SKILL_DIR} pull

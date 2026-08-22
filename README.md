@@ -22,15 +22,25 @@ journal so the whole thing can be undone.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/akinfold/yandex-disk-downloads-sort-skill/HEAD/install.sh)"
 ```
 
-The installer clones this repository into `~/.local/share/`, links the skill where Claude Code,
-Codex, Cursor and other Agent Skills clients look for it, walks you through getting a Yandex
-Disk OAuth token, and saves that token to `~/.yandex-disk-token` with owner-only permissions.
-It uses no `sudo`, touches nothing outside your home directory, and can be re-run to update.
+The installer:
+
+- clones this repository into `~/.local/share/yandex-disk-downloads-sort-skill`;
+- links the skill into `~/.claude/skills` and `~/.agents/skills`, where Claude Code, Codex,
+  Cursor and other Agent Skills clients look for it;
+- explains how to get a Yandex Disk OAuth token, reads it without echoing it, checks it against
+  the API and tells you which account it belongs to;
+- writes it to `~/.yandex-disk-token`, readable by you alone;
+- adds `YANDEX_DISK_TOKEN_FILE` to `~/.claude/settings.json` (backing the file up first and
+  leaving your other settings untouched), so Claude Code finds the token by itself.
+
+No `sudo`; everything lands in your home directory apart from one short-lived temp file used
+to check the token. Re-run it to update. Options go after an empty argument, which `bash`
+assigns to `$0`: `... install.sh)" '' --no-token`, and `--help` lists them.
 
 Then ask your agent: *"What's in my Downloads folder on Yandex Disk?"*
 
-Prefer to look before you run it? Read [install.sh](install.sh) — that URL serves exactly this
-file — or follow [the manual steps](#1-get-a-yandex-disk-oauth-token) instead.
+Rather read it first? [install.sh](install.sh) is the file that URL serves. Or skip the
+installer and follow [the manual steps](#1-get-a-yandex-disk-oauth-token).
 
 ## What it does, and what it never does
 
