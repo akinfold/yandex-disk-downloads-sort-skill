@@ -55,6 +55,28 @@ class Verdict:
 
 
 @dataclass
+class FolderVerdict:
+    """Where a subfolder should go, and why."""
+
+    folder: str
+    reason: str
+    category: str = "folders"
+    skip: Optional[str] = None
+    files: int = 0
+    size: int = 0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "folder": self.folder,
+            "reason": self.reason,
+            "category": self.category,
+            "skip": self.skip,
+            "files": self.files,
+            "size": self.size,
+        }
+
+
+@dataclass
 class Rules:
     raw: Dict[str, Any]
     categories: List[Dict[str, Any]]
@@ -62,6 +84,7 @@ class Rules:
     ext_index: Dict[str, str]
     name_rules: List[Dict[str, Any]]
     media_fallback: Dict[str, str]
+    folder_rules: Dict[str, Any]
     ambiguous: Dict[str, Dict[str, str]]
     skip_extensions: set
     skip_patterns: List[re.Pattern] = field(default_factory=list)
@@ -95,6 +118,7 @@ def load_rules(path: Optional[str] = None) -> Rules:
         ext_index=ext_index,
         name_rules=name_rules,
         media_fallback=dict(raw.get("media_type_fallback") or {}),
+        folder_rules=dict(raw.get("folder_rules") or {}),
         ambiguous={k: v for k, v in (raw.get("ambiguous_extensions") or {}).items() if isinstance(v, dict)},
         skip_extensions={e.lower().lstrip(".") for e in skip.get("extensions") or []},
         skip_patterns=[re.compile(p, re.IGNORECASE) for p in skip.get("name_regex") or []],
@@ -196,6 +220,57 @@ def classify(item: Dict[str, Any], rules: Rules, lang: str = "en") -> Verdict:
             break
 
     return Verdict(chosen["id"], folder, reason, ext_display, sensitive=bool(chosen.get("sensitive")))
+
+
+# -- folders ---------------------------------------------------------------
+
+
+def classify_folder(
+    item: Dict[str, Any],
+    contents: List[Dict[str, Any]],
+    rules: Rules,
+    lang: str = "en",
+) -> FolderVerdict:
+    """Decide where a subfolder belongs from the files inside it.
+
+    ``contents`` is the folder's files (recursively, as far as the caller scanned). A
+    folder whose files are overwhelmingly of one kind joins that category — a folder of
+    photos belongs with the images, not in a bucket named after its own shape. Anything
+    mixed, empty or unscannable goes to the generic folders category, which is the honest
+    answer rather than a guess.
+    """
+    name = str(item.get("name") or "")
+    conf = rules.folder_rules
+    never = ((conf.get("never_move") or {}).get("names")) or []
+    if name in never:
+        return FolderVerdict("", "a folder the Disk manages itself", "folders", skip="system-folder")
+
+    files = [c for c in contents if c.get("type") == "file"]
+    total_size = sum(int(c.get("size") or 0) for c in files)
+    generic = folder_for(rules.by_id["folders"], lang)
+
+    if len(files) < int(conf.get("min_files", 1) or 1):
+        return FolderVerdict(generic, "no files to judge it by", "folders", files=len(files), size=total_size)
+
+    counts: Dict[str, int] = {}
+    for child in files:
+        verdict = classify(child, rules, lang)
+        if verdict.skip:
+            continue
+        counts[verdict.category] = counts.get(verdict.category, 0) + 1
+    if not counts:
+        return FolderVerdict(generic, "only partial downloads inside", "folders", files=len(files), size=total_size)
+
+    top, hits = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    counted = sum(counts.values())
+    share = hits / counted if counted else 0.0
+    threshold = float(conf.get("dominant_share", 0.6) or 0.6)
+    if share >= threshold and top not in ("other", "folders"):
+        target = folder_for(rules.by_id[top], lang)
+        percent = int(round(share * 100))
+        return FolderVerdict(target, f"{percent}% of its {counted} files are {top}", top, files=len(files), size=total_size)
+    kinds = ", ".join(sorted(counts)[:3])
+    return FolderVerdict(generic, f"mixed contents ({kinds})", "folders", files=len(files), size=total_size)
 
 
 # -- dates -----------------------------------------------------------------

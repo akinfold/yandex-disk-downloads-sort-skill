@@ -391,6 +391,15 @@
       ]
     },
     {
+      "id": "folders",
+      "folder": {
+        "en": "Folders",
+        "ru": "Папки"
+      },
+      "_comment": "Where a subfolder goes when its contents are mixed, or when folder classification is off. Folders whose files are overwhelmingly of one kind go to that category instead.",
+      "extensions": []
+    },
+    {
       "id": "other",
       "folder": {
         "en": "Other",
@@ -493,6 +502,34 @@
     "duplicates": {
       "en": "_Duplicates",
       "ru": "_Дубликаты"
+    }
+  },
+  "folder_rules": {
+    "_comment": "How a subfolder is classified. Its files are counted recursively (capped by scan limits); if one category holds at least `dominant_share` of them, the folder joins that category, otherwise it goes to `folders`.",
+    "dominant_share": 0.6,
+    "min_files": 1,
+    "max_scan_items": 400,
+    "max_depth": 3,
+    "never_move": {
+      "_comment": "Folder names never moved, whatever they contain: the Disk's own system folders. Category folders and the duplicates folder are protected by the planner, which knows their current names.",
+      "names": [
+        "Фотокамера",
+        "Скриншоты",
+        "Социальные сети",
+        "Приложения",
+        "Сканы",
+        "Почтовые вложения",
+        "Файлы Мессенджера",
+        "Материалы встреч",
+        "Camera",
+        "Screenshots",
+        "Social networks",
+        "Applications",
+        "Scans",
+        "Mail attachments",
+        "Messenger files",
+        "Meeting materials"
+      ]
     }
   }
 }

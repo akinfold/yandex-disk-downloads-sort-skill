@@ -1,11 +1,11 @@
 ---
 name: yandex-disk-downloads-sort
-description: Analyzes and tidies the Downloads folder ("Загрузки") on Yandex Disk through the Yandex Disk REST API. Inventories every file, reports what is there by type, size and age, finds exact duplicates, partial downloads and stray installers, then sorts files into category folders (Documents, Images, Screenshots, Archives, Installers, ...) with a reviewable dry-run plan, no overwrites, no deletes, and an undo journal. Use this whenever the user mentions Yandex Disk / Яндекс Диск / Я.Диск together with Downloads / Загрузки, a cluttered cloud folder, cleaning up, sorting, organizing, "what is in my Downloads", duplicates, or freeing space on Yandex Disk, even if they never say "sort". Needs a Yandex OAuth token in YANDEX_DISK_TOKEN (see references/oauth-token.md to get one in two minutes).
+description: Analyzes and tidies the Downloads folder ("Загрузки") on Yandex Disk through the Yandex Disk REST API. Inventories every file and subfolder, reports what is there by type, size and age, finds exact duplicates, partial downloads and stray installers, then sorts files and whole subfolders into category folders (Documents, Images, Screenshots, Archives, Installers, ...) with a reviewable dry-run plan, no overwrites, no deletes, and an undo journal. Use this whenever the user mentions Yandex Disk / Яндекс Диск / Я.Диск together with Downloads / Загрузки, a cluttered cloud folder, cleaning up, sorting, organizing, "what is in my Downloads", duplicates, or freeing space on Yandex Disk, even if they never say "sort". Needs a Yandex OAuth token in YANDEX_DISK_TOKEN (see references/oauth-token.md to get one in two minutes).
 license: MIT
 compatibility: Python 3.9+ (standard library only) and outbound HTTPS to cloud-api.yandex.net. Works in Claude Code, Claude Cowork, OpenAI Codex and any agent that can run scripts; for ChatGPT use the Custom GPT action in chatgpt/ of the repository instead.
 metadata:
   author: Roman Akinfeev
-  version: "1.0.0"
+  version: "1.1.0"
   repository: https://github.com/akinfold/yandex-disk-downloads-sort-skill
 ---
 
@@ -56,9 +56,8 @@ folder does not exist under that name: ask the user and pass `--path "disk:/Some
 python scripts/downloads_sort.py analyze
 ```
 
-Lists only the files directly inside Downloads (subfolders are reported but never entered:
-they are somebody's existing organization), classifies each one, and prints a markdown
-report: proposed categories with counts and sizes, exact duplicates (same md5 and size),
+Lists what sits directly inside Downloads — both files and subfolders — classifies each one
+and prints a markdown report: proposed categories with counts and sizes, exact duplicates (same md5 and size),
 look-alike names with different content, partial downloads that will be skipped, sensitive
 files (keys, certificates), the largest and oldest files, and extension statistics. It also
 writes `inventory.json` and `report.md` to the workdir.
@@ -90,6 +89,7 @@ wishes: re-run with different options until they like the result.
 | `--min-age-minutes N` | Skip files modified less than N minutes ago (default 5; they may still be syncing). |
 | `--max-moves N` | Cap the number of moves for a cautious first run. |
 | `--rules file.json` (global) | Custom categories: see `references/sorting-rules.md`. |
+| `--folders content\|group\|skip` (global) | What to do with subfolders. `content` (default) sends each to the category its files belong to; `group` puts them all in one `Folders`/`Папки`; `skip` leaves them where they are, as versions before 1.1 did. |
 
 Show the user the summary table and the skipped reasons, and ask for an explicit go-ahead.
 Mention anything the plan will do that they might not expect: renames on name clashes,
@@ -132,6 +132,8 @@ it has nothing left to undo, older journals that still do are listed.
   not plan or move unless asked.
 - **"Clean up / sort my Downloads."** → full workflow. Default options are right for most
   people; offer `--by-date year` if the folder is large or spans years.
+- **"Don't touch my folders."** → `--folders skip`. **"Put all folders in one place."** →
+  `--folders group`.
 - **"Only the screenshots / only the PDFs."** → `plan --only screenshots` or `--only documents`.
 - **"Find duplicates."** → `analyze`; the duplicates section has the groups. Sorting with
   `--duplicates quarantine` parks the copies in one folder; the user deletes them by hand
@@ -147,8 +149,17 @@ it has nothing left to undo, older journals that still do are listed.
 
 - **No deletes, no overwrites.** A sorter that can destroy data must be confirmed twice; one
   that cannot needs only a plan review. `overwrite=false` on every move; clashes get suffixes.
-- **Top level only.** Subfolders inside Downloads were made by the user or by the Disk itself
-  (`Фотокамера`, `Скриншоты`, app folders). Entering them would undo someone's organization.
+- **Subfolders move as a whole; nothing is reorganized inside them.** A folder joins the
+  category holding at least 60% of its files (a folder of photos goes with the images), and
+  anything mixed lands in `Folders`/`Папки`. What is inside keeps its own arrangement, which
+  is somebody's work. The Disk's own folders (`Фотокамера`, `Скриншоты`, app folders), the
+  category folders themselves and the duplicates folder are never moved.
+- **A folder move is checked, not assumed.** The API performs it in the background and can
+  stop halfway, so after every folder move the skill looks at the disk: source gone means
+  done; both source and destination present means it stopped, and the remainder is carried
+  over item by item and merged into the destination. Files already at the destination are
+  never overwritten — a clash gets a ` (2)` suffix — and the emptied source folder goes to
+  the bin only once it is genuinely empty.
 - **Partial downloads are skipped** (`.crdownload`, `.part`, `.download`, ...) together with
   lock files (`~$x.docx`) and OS metadata; moving a file still being written corrupts it.
 - **Recently modified files are skipped** (5 minutes by default): the Disk client may still
@@ -168,6 +179,8 @@ it has nothing left to undo, older journals that still do are listed.
 | `404 DownloadsNotFound` on `check` | The Disk has not created the system folder yet (fresh account) or it is named differently | Ask the user; `--path "disk:/…"` |
 | `429` / `503` | Rate limited or API hiccup | Scripts retry; if it persists, wait a minute |
 | A move shows `(renamed)` | The target name was taken; the file got a ` (2)` suffix | Nothing to do; tell the user |
+| A folder shows `(merged N item(s) …)` | Something already lived at the destination, so the two were merged | Expected; report the count |
+| A folder shows `(deferred move ended failed …)` | The background move stopped halfway; the rest was carried over by hand | Already handled; say so, and check the final counts |
 | A file shows as `missing` or `changed` | It vanished, or its content/type changed, between `plan` and `apply` | Re-run `analyze` + `plan` |
 | Folder names came out English on a Russian Disk | Downloads folder has a Latin name | `--names ru` |
 | `CERTIFICATE_VERIFY_FAILED` (macOS) | python.org Python without root certificates | `export SSL_CERT_FILE=/etc/ssl/cert.pem`, or run `Install Certificates.command`, or `pip install certifi` |

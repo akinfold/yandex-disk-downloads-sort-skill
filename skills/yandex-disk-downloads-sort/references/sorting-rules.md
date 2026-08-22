@@ -56,6 +56,7 @@ Extensions are matched case-insensitively and without the dot. Multi-part extens
 | `fonts` | Fonts / Шрифты | ttf, otf, woff(2), … |
 | `torrents` | Torrents / Торренты | torrent |
 | `certificates` | Certificates and keys / Сертификаты и ключи | pem, crt, cer, p12, pfx, ovpn, ppk, kdbx, gpg, jks, … (**sensitive**) |
+| `folders` | Folders / Папки | a subfolder whose contents are mixed or empty |
 | `other` | Other / Прочее | everything else |
 
 Default name rules:
@@ -72,6 +73,29 @@ Default name rules:
   `Certificate of completion.pdf` is a document.
 
 Special folders: exact duplicates go to `_Duplicates` / `_Дубликаты` (`special_folders.duplicates`).
+
+## Subfolders
+
+A subfolder is judged by what is inside it, not by its name. `scan_folders` lists it
+recursively — bounded by `folder_rules.max_scan_items` (400) and `max_depth` (3) so one huge
+folder cannot stall a run — classifies every file it finds, and then:
+
+- if one category holds at least `dominant_share` (0.6) of those files, the folder joins that
+  category: a folder of holiday photos goes to `Images`/`Изображения`, not into a bucket named
+  after its own shape;
+- otherwise, and for empty folders, it goes to the generic `folders` category
+  (`Folders`/`Папки`);
+- partial downloads are ignored when counting, so a folder of half-finished downloads is not
+  classified by them.
+
+`folder_rules.never_move.names` lists the Disk's own folders (`Фотокамера`, `Скриншоты`,
+`Социальные сети`, `Приложения`, …), which are left alone whatever they contain. On top of
+that the planner protects every folder a category could occupy in the current language, the
+duplicates folder, and refuses to move a folder into a path inside itself.
+
+`--folders group` sends every subfolder to `Folders`/`Папки` without looking inside, which
+costs no extra API calls. `--folders skip` restores the pre-1.1 behaviour of leaving folders
+alone entirely.
 
 ## Things the rules do not decide
 

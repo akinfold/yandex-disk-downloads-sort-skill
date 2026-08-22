@@ -271,6 +271,39 @@ class YandexDisk:
             raise _error_from(status, payload)
         return status, payload
 
+    def move_deferred(self, source: str, destination: str, *, overwrite: bool = False) -> Dict[str, Any]:
+        """Move, reporting the outcome instead of raising when the server gives up.
+
+        A folder move answers ``202`` and finishes in the background, and that background
+        half can fail after moving part of the tree. Returns ``{"status": ...}`` where the
+        status is ``success``, ``failed`` or ``timeout``; only transport and 4xx problems
+        still raise, because those happen before anything can have moved.
+        """
+        params = {"from": source, "path": destination, "overwrite": "true" if overwrite else "false"}
+        status, payload = self._api("POST", "/resources/move", params)
+        if status != 202:
+            return {"status": "success", "deferred": False}
+        href = payload.get("href", "") if isinstance(payload, dict) else ""
+        result = self.poll_operation(href)
+        result["deferred"] = True
+        return result
+
+    def poll_operation(self, href: str, *, timeout: float = OPERATION_TIMEOUT) -> Dict[str, Any]:
+        """Poll a deferred operation and report how it ended, without raising."""
+        if not href:
+            return {"status": "success"}
+        deadline = time.monotonic() + timeout
+        while True:
+            status, payload = self._send("GET", href)
+            if status >= 400:
+                return {"status": "unknown", "error": _error_from(status, payload).message}
+            state = str(payload.get("status", "")) if isinstance(payload, dict) else ""
+            if state in ("success", "failed"):
+                return {"status": state}
+            if time.monotonic() >= deadline:
+                return {"status": "timeout"}
+            self._sleep(OPERATION_POLL_INTERVAL)
+
     def _run(self, method: str, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Call an endpoint that may answer 202 and wait for the deferred half."""
         status, payload = self._api(method, endpoint, params)

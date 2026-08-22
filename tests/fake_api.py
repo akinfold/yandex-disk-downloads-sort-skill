@@ -38,6 +38,11 @@ class FakeDisk:
     def __init__(self, downloads: str = "disk:/Загрузки", token: str = TOKEN):
         self.lose_response_for: set = set()  # source paths whose move succeeds but answers 502 once
         self.echo_twice: Optional[str] = None  # a path the listing repeats (simulates a page shift)
+        # Deferred folder moves: the real API answers 202 and finishes in the background,
+        # and that background half can move part of a tree and then give up.
+        self.partial_move_for: Dict[str, int] = {}  # source path -> how many children to move
+        self.fail_operation_for: set = set()        # source paths whose operation ends "failed"
+        self.hang_operation_for: set = set()        # source paths whose operation never finishes
         self.token = token
         self.downloads = downloads
         self.tree: Dict[str, Dict[str, Any]] = {"disk:/": {"type": "dir", "name": "", "path": "disk:/"}}
@@ -87,14 +92,21 @@ class FakeDisk:
         prefix = _norm(path).rstrip("/") + "/"
         return sorted(k for k, v in self.tree.items() if k.startswith(prefix) and v["type"] == "file")
 
-    def move(self, src: str, dst: str) -> None:
+    def move(self, src: str, dst: str, *, limit: Optional[int] = None) -> None:
+        """Move a subtree. With ``limit`` only that many descendants move, leaving the rest
+        behind — which is what a deferred operation that fails halfway looks like."""
         src, dst = _norm(src), _norm(dst)
-        moved = {k: v for k, v in self.tree.items() if k == src or k.startswith(src + "/")}
-        for k, v in moved.items():
-            del self.tree[k]
+        keys = sorted(k for k in self.tree if k == src or k.startswith(src + "/"))
+        if limit is not None:
+            # The root itself plus `limit` descendants: a partially moved folder.
+            keys = keys[: limit + 1]
+        for k in keys:
+            v = self.tree.pop(k)
             new_key = dst + k[len(src):]
-            v = dict(v, path=new_key, name=new_key.rsplit("/", 1)[-1])
-            self.tree[new_key] = v
+            self.tree[new_key] = dict(v, path=new_key, name=new_key.rsplit("/", 1)[-1])
+        if limit is not None and any(k.startswith(src + "/") for k in self.tree):
+            # The source folder still exists while it still holds anything.
+            self.tree.setdefault(src, {"type": "dir", "name": src.rsplit("/", 1)[-1], "path": src})
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -142,6 +154,12 @@ class _Handler(BaseHTTPRequestHandler):
                 polls = fake.operations.get(op_id)
                 if polls is None:
                     self._error(404, "DiskNotFoundError", "Operation not found")
+                    return
+                if polls == -1:
+                    self._send(200, {"status": "in-progress"})  # hangs forever
+                    return
+                if polls == -2:
+                    self._send(200, {"status": "failed"})
                     return
                 fake.operations[op_id] = polls + 1
                 self._send(200, {"status": "in-progress" if polls == 0 else "success"})
@@ -212,7 +230,29 @@ class _Handler(BaseHTTPRequestHandler):
         if dst in fake.tree and not overwrite:
             self._error(409, "DiskResourceAlreadyExistsError", "Resource already exists.")
             return
-        fake.move(src, dst)
+        deferred = fake.tree[src]["type"] == "dir" or fake.async_moves
+        limit = fake.partial_move_for.pop(src, None)
+        will_fail = src in fake.fail_operation_for
+        will_hang = src in fake.hang_operation_for
+        if will_hang:
+            fake.hang_operation_for.discard(src)
+            fake.move(src, dst, limit=limit)  # part of the tree moves, then the report stalls
+            op_id = f"op{len(fake.operations) + 1}"
+            fake.operations[op_id] = -1  # never leaves in-progress
+            self._send(202, {"href": f"http://{self.headers.get('Host')}/v1/disk/operations?id={op_id}", "method": "GET", "templated": False})
+            return
+        fake.move(src, dst, limit=limit)
+        if will_fail:
+            fake.fail_operation_for.discard(src)
+            op_id = f"op{len(fake.operations) + 1}"
+            fake.operations[op_id] = -2  # reports "failed"
+            self._send(202, {"href": f"http://{self.headers.get('Host')}/v1/disk/operations?id={op_id}", "method": "GET", "templated": False})
+            return
+        if deferred and not fake.async_moves:
+            op_id = f"op{len(fake.operations) + 1}"
+            fake.operations[op_id] = 1  # already done on the next poll
+            self._send(202, {"href": f"http://{self.headers.get('Host')}/v1/disk/operations?id={op_id}", "method": "GET", "templated": False})
+            return
         if src in fake.lose_response_for:
             fake.lose_response_for.discard(src)
             self._send(502, None, {})  # the backend committed the move, the client never learns

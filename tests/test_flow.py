@@ -58,9 +58,9 @@ class FlowTests(helpers.FakeServerTest):
         inv = self.load("inventory.json")
         self.assertEqual(inv["lang"], "ru")
         self.assertEqual(len(inv["files"]), 12)
-        self.assertEqual(inv["folders"], ["Existing folder", "Документы"])
+        self.assertEqual(inv["folder_names"], ["Existing folder", "Документы"])
 
-        code, summary = self.run_cli("plan")
+        code, summary = self.run_cli("--folders", "skip", "plan")
         self.assertEqual(code, 0)
         plan = self.load("plan.json")
         targets = {m["from"].rsplit("/", 1)[-1]: m["folder"] for m in plan["moves"]}
@@ -115,8 +115,8 @@ class FlowTests(helpers.FakeServerTest):
         self.assertEqual(overwrite_calls, [])
 
         # Re-running analyze+plan on the sorted folder must find nothing to do.
-        self.run_cli("analyze")
-        code, out = self.run_cli("plan")
+        self.run_cli("--folders", "skip", "analyze")
+        code, out = self.run_cli("--folders", "skip", "plan")
         plan2 = self.load("plan.json")
         self.assertEqual(plan2["moves"], [])
 

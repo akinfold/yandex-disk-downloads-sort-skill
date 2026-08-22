@@ -53,6 +53,10 @@ installer and follow [the manual steps](#1-get-a-yandex-disk-oauth-token).
   Yandex's own `media_type`, into Documents, Spreadsheets, Presentations, Images, Screenshots,
   Videos, Audio, Archives, Installers, Disk images, Code and data, Books, Fonts, Torrents,
   Certificates, Other. Folder names come out Russian on a Russian Disk and English otherwise.
+- Sorts **subfolders** too: a folder joins the category holding most of its files, mixed ones
+  go to `Folders`/`Папки`. Folder moves happen in the background on Yandex's side and can stop
+  halfway, so each one is verified afterwards and any remainder is merged into the destination
+  by hand. `--folders skip` leaves folders alone.
 - Detects exact duplicates (same `md5` and size), keeps the cleanest-named copy and parks the
   rest in `_Duplicates` / `_Дубликаты`; reports look-alike names with different content.
 - **Never deletes, never overwrites** (name clashes get a ` (2)` suffix), never enters

@@ -73,6 +73,15 @@ before the extension. 201 + Link when done synchronously (files, empty folders);
 an operation for non-empty folders or with `force_async=true`. 404 when `from` is gone; 409
 `DiskPathDoesntExistsError` when the target folder is missing.
 
+**Folders always take the deferred path.** A folder move answers `202` and finishes in the
+background, and that background half can move part of the tree and then report `failed` — or
+report `success` while the source is still there. The skill therefore treats the operation
+status as a hint and the disk as the truth: after every folder move it lists the source and
+the destination, and if both still exist it carries the remainder over item by item
+(`merge_folder`), creating the destination folders it needs, renaming on clashes, and sending
+the emptied source folder to the bin only when it is genuinely empty. A destination that
+already exists is never handed to `move` at all — the API answers `409` rather than merging.
+
 ### `GET /operations?id=…` — deferred operation status
 
 `{"status": "in-progress" | "success" | "failed"}`; 404 `DiskOperationNotFoundError` for an

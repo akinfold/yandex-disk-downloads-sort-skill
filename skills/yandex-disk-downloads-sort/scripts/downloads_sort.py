@@ -31,7 +31,7 @@ import tempfile
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -57,6 +57,8 @@ SUFFIX_ATTEMPTS = 50
 VERBOSE_FIRST = 40      # apply/undo print every move up to this many...
 PROGRESS_EVERY = 50     # ...then one progress line per this many (agent harnesses truncate long output)
 SUMMARY_ROWS = 40       # plan summary table rows; the rest is in plan.json
+MERGE_MAX_DEPTH = 16    # refuse to recurse forever when merging a partially moved folder
+FOLDER_SCAN_FIELDS = ",".join(f"_embedded.items.{f}" for f in ("name", "path", "type", "size", "media_type", "md5", "resource_id")) + ",_embedded.total,_embedded.limit,_embedded.offset"
 JOURNAL_VERSION = 2
 
 
@@ -122,6 +124,7 @@ def load_journal(path: str) -> Dict[str, Any]:
     header: Dict[str, Any] = {}
     folders: List[str] = []
     entries: Dict[int, Dict[str, Any]] = {}
+    merged: Dict[int, List[Dict[str, Any]]] = {}
     finished = False
     with open(path, encoding="utf-8") as handle:
         for line in handle:
@@ -149,6 +152,16 @@ def load_journal(path: str) -> Dict[str, Any]:
                 entry = entries[event["idx"]]
                 entry.update({k: v for k, v in event.items() if k not in ("type", "time", "idx")})
                 entry["actual_to"] = event.get("to", entry.get("to"))
+            elif kind == "merged":
+                # A merge moved items one by one; undo has to put them back the same way,
+                # because the destination folder may hold things that were always there.
+                merged.setdefault(event["idx"], []).append(
+                    {k: v for k, v in event.items() if k not in ("type", "time")}
+                )
+            elif kind == "merged_undone":
+                for record in merged.get(event.get("idx"), []):
+                    if record.get("to") == event.get("to"):
+                        record["undone"] = True
             elif kind == "undone" and event.get("idx") in entries:
                 entries[event["idx"]]["undone"] = True
                 entries[event["idx"]]["restored_to"] = event.get("restored_to")
@@ -156,6 +169,9 @@ def load_journal(path: str) -> Dict[str, Any]:
                 entries[event["idx"]]["undo_error"] = event.get("error")
             elif kind in ("finished", "aborted", "interrupted"):
                 finished = True
+    for idx, records in merged.items():
+        if idx in entries:
+            entries[idx]["merged_children"] = records
     return {
         "path": path,
         "header": header,
@@ -257,10 +273,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     items = list_top_level(disk, path, FIELDS)
     files = [dict(i) for i in items if i.get("type") == "file"]
-    folders = [i.get("name") for i in items if i.get("type") == "dir"]
     for item in files:
         verdict = cls.classify(item, rules, lang)
         item["verdict"] = verdict.as_dict()
+    folders = [] if args.folders == "skip" else scan_folders(disk, items, rules, lang)
     duplicates = cls.find_exact_duplicates(files)
     lookalikes = cls.find_name_lookalikes(files)
 
@@ -272,6 +288,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         "rules": os.path.abspath(args.rules) if args.rules else "default",
         "disk": {k: info.get(k) for k in ("total_space", "used_space", "trash_size")},
         "folders": folders,
+        "folder_names": [i.get("name") for i in items if i.get("type") == "dir"],
         "files": files,
         "duplicates": [
             {"md5": g["md5"], "size": g["size"], "keep": g["keep"]["path"], "extra": [e["path"] for e in g["extra"]]}
@@ -291,6 +308,50 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def scan_folders(disk: YandexDisk, items: List[Dict[str, Any]], rules: cls.Rules, lang: str) -> List[Dict[str, Any]]:
+    """Look inside each subfolder far enough to say what kind of folder it is."""
+    conf = rules.folder_rules
+    max_items = int(conf.get("max_scan_items", 400) or 400)
+    max_depth = int(conf.get("max_depth", 3) or 3)
+    out = []
+    for item in items:
+        if item.get("type") != "dir":
+            continue
+        contents, truncated = scan_tree(disk, item["path"], max_items, max_depth)
+        verdict = cls.classify_folder(item, contents, rules, lang)
+        record = dict(item)
+        record["verdict"] = verdict.as_dict()
+        record["scanned"] = len(contents)
+        record["truncated"] = truncated
+        out.append(record)
+    return out
+
+
+def scan_tree(disk: YandexDisk, path: str, max_items: int, max_depth: int) -> Tuple[List[Dict[str, Any]], bool]:
+    """Breadth-first listing of a folder, bounded so one huge folder cannot stall a run."""
+    found: List[Dict[str, Any]] = []
+    queue = [(path, 0)]
+    truncated = False
+    while queue:
+        current, depth = queue.pop(0)
+        try:
+            children = list(disk.iter_children(current, fields=FOLDER_SCAN_FIELDS))
+        except YandexDiskError:
+            truncated = True
+            continue
+        for child in children:
+            if len(found) >= max_items:
+                return found, True
+            if child.get("type") == "dir":
+                if depth + 1 < max_depth:
+                    queue.append((child["path"], depth + 1))
+                else:
+                    truncated = True
+            else:
+                found.append(child)
+    return found, truncated
+
+
 def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
     files: List[Dict[str, Any]] = inv["files"]
     lang = inv["lang"]
@@ -299,7 +360,13 @@ def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
     lines.append("# Downloads on Yandex Disk: analysis")
     lines.append("")
     lines.append(f"- Folder: `{inv['downloads']}`")
-    lines.append(f"- Files: {len(files)} ({cls.human_size(total_size)}); subfolders: {len(inv['folders'])} (left untouched)")
+    folder_records = [f for f in (inv.get("folders") or []) if isinstance(f, dict)]
+    subfolder_count = len(inv.get("folder_names") or folder_records)
+    if folder_records:
+        movable = [f for f in folder_records if not (f["verdict"].get("skip"))]
+        lines.append(f"- Files: {len(files)} ({cls.human_size(total_size)}); subfolders: {subfolder_count} ({len(movable)} of them will be sorted too)")
+    else:
+        lines.append(f"- Files: {len(files)} ({cls.human_size(total_size)}); subfolders: {subfolder_count} (left untouched)")
     disk = inv.get("disk") or {}
     if disk.get("total_space"):
         lines.append(f"- Disk: {cls.human_size(disk.get('used_space'))} used of {cls.human_size(disk.get('total_space'))}, trash {cls.human_size(disk.get('trash_size'))}")
@@ -381,6 +448,20 @@ def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
         lines.append("- Nothing unusual.")
     lines.append("")
 
+    if folder_records:
+        lines.append("## Subfolders")
+        lines.append("")
+        lines.append("| Folder | Files inside | Goes to | Why |")
+        lines.append("|---|---:|---|---|")
+        for rec in folder_records[:SUMMARY_ROWS]:
+            v = rec["verdict"]
+            destination = "stays" if v.get("skip") else f"`{md_escape(v['folder'])}`"
+            note = v["reason"] + (", listing truncated" if rec.get("truncated") else "")
+            lines.append(f"| `{md_escape(rec['name'])}` | {v.get('files', 0)} | {destination} | {note} |")
+        if len(folder_records) > SUMMARY_ROWS:
+            lines.append(f"| ... and {len(folder_records) - SUMMARY_ROWS} more | | | full list in inventory.json |")
+        lines.append("")
+
     largest = sorted(files, key=lambda f: -int(f.get("size") or 0))[:10]
     if largest:
         lines.append("## Largest files")
@@ -449,6 +530,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             for extra in group["extra"]:
                 dup_of[extra] = short(group["keep"])
     dup_folder = cls.special_folder(rules, "duplicates", lang)
+    generic_folder = cls.folder_for(rules.by_id["folders"], lang)
 
     moves: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
@@ -516,6 +598,65 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if len(entry["examples"]) < 3:
             entry["examples"].append(name)
 
+    # Folders come after files so that a folder cannot be moved out from under a file the
+    # plan already accounted for, and so the destination folders exist by then.
+    # Every folder a category could ever occupy is a destination, whether or not this run
+    # happens to fill it. Otherwise a tidy folder would be moved into itself the moment a
+    # run has nothing else to do: Документы -> Документы/Документы.
+    target_folders = {normalize_path(p) for p in folders}
+    for cat in rules.categories:
+        target_folders.add(normalize_path(join_path(downloads, cls.folder_for(cat, lang))))
+    for rule in rules.name_rules:
+        if rule.get("folder"):
+            target_folders.add(normalize_path(join_path(downloads, cls.folder_for(rule, lang))))
+    target_folders.add(normalize_path(join_path(downloads, dup_folder)))
+    for rec in inv.get("folders") or []:
+        if not isinstance(rec, dict):
+            continue  # inventory from an older run listed names only
+        verdict = cls.classify_folder(rec, [], rules, lang) if "verdict" not in rec else None
+        v = rec.get("verdict") or (verdict.as_dict() if verdict else {})
+        name, source = rec.get("name") or short(rec["path"]), rec["path"]
+        if args.folders == "skip":
+            continue
+        if v.get("skip"):
+            skipped.append({"path": source, "reason": v.get("reason", "left alone")})
+            continue
+        folder = generic_folder if args.folders == "group" else v["folder"]
+        target_folder = join_path(downloads, folder)
+        target = join_path(target_folder, name)
+        if normalize_path(source) in target_folders or normalize_path(source) == normalize_path(target_folder):
+            skipped.append({"path": source, "reason": "this folder is one of the sorting destinations"})
+            continue
+        if normalize_path(target) == normalize_path(source):
+            skipped.append({"path": source, "reason": "already in place"})
+            continue
+        if normalize_path(target_folder).startswith(normalize_path(source) + "/"):
+            skipped.append({"path": source, "reason": "cannot move a folder inside itself"})
+            continue
+        chain = ancestors_within(target_folder, downloads)
+        taken = next((p for p in chain if p in file_paths), None)
+        if taken:
+            skipped.append({"path": source, "reason": f"target folder name is taken by a file: {short(taken)}"})
+            continue
+        for ancestor in chain:
+            folders[ancestor] = None
+        moves.append({
+            "from": source,
+            "to": target,
+            "folder": folder,
+            "category": v.get("category", "folders"),
+            "reason": v.get("reason", ""),
+            "size": int(v.get("size") or 0),
+            "kind": "dir",
+            "files_inside": v.get("files", 0),
+            "sensitive": False,
+        })
+        entry = summary.setdefault(folder, {"count": 0, "size": 0, "examples": []})
+        entry["count"] += 1
+        entry["size"] += int(v.get("size") or 0)
+        if len(entry["examples"]) < 3:
+            entry["examples"].append(name + "/")
+
     truncated = 0
     if args.max_moves and len(moves) > args.max_moves:
         truncated = len(moves) - args.max_moves
@@ -542,6 +683,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "only": sorted(only),
             "exclude": sorted(exclude),
             "max_moves": args.max_moves,
+            "folders": args.folders,
         },
         "folders": ordered_folders,
         "moves": moves,
@@ -601,6 +743,142 @@ def render_plan_summary(plan: Dict[str, Any], summary: Optional[Dict[str, Dict[s
         lines.append("")
         lines.append("Skipped: " + "; ".join(f"{n} x {r}" for r, n in sorted(reasons.items(), key=lambda kv: -kv[1])))
     return "\n".join(lines)
+
+
+# -- moving folders ------------------------------------------------------------
+#
+# A folder move is deferred: the API answers 202 and finishes in the background. That
+# background half can fail after moving part of the tree, and it refuses outright when
+# something already sits at the destination. So a folder move here is never "fire and
+# forget": whatever the operation reports, the result is checked against the disk, and
+# anything left behind is carried over item by item and merged into the destination.
+
+
+def move_folder(disk: YandexDisk, source: str, target: str, journal, idx: int, verbose: bool = False) -> Dict[str, Any]:
+    """Move a folder, then make sure it really got there. Returns a result dict."""
+    moved_children: List[Dict[str, Any]] = []
+
+    if disk.exists(target):
+        # The server would answer 409 rather than merge, so merge deliberately.
+        result = merge_folder(disk, source, target, journal, idx, moved_children, verbose)
+        result["merged"] = True
+        return result
+
+    try:
+        outcome = disk.move_deferred(source, target, overwrite=False)
+    except YandexDiskError as exc:
+        if exc.status == 404:
+            return {"status": "missing", "to": target, "error": exc.message}
+        if exc.status == 409 and exc.code == ERR_PARENT_MISSING:
+            disk.mkdir(parent_of(target))
+            try:
+                outcome = disk.move_deferred(source, target, overwrite=False)
+            except YandexDiskError as retry_exc:
+                return {"status": "failed", "to": target, "error": str(retry_exc), "code": retry_exc.code}
+        else:
+            return {"status": "failed", "to": target, "error": str(exc), "code": exc.code}
+
+    if outcome.get("status") == "success" and not disk.exists(source):
+        return {"status": "moved", "to": target, "kind": "dir", "whole": True}
+
+    # Either the operation failed, timed out, or claimed success while the source is still
+    # there. Trust the disk, not the report.
+    state = outcome.get("status", "unknown")
+    if not disk.exists(source):
+        return {"status": "moved", "to": target, "kind": "dir", "whole": True, "operation": state}
+    if not disk.exists(target):
+        return {"status": "failed", "to": target, "error": f"the deferred move ended as {state} and nothing was moved"}
+
+    result = merge_folder(disk, source, target, journal, idx, moved_children, verbose)
+    result["partial_recovered"] = True
+    result["operation"] = state
+    return result
+
+
+def merge_folder(
+    disk: YandexDisk,
+    source: str,
+    target: str,
+    journal,
+    idx: int,
+    moved_children: List[Dict[str, Any]],
+    verbose: bool = False,
+    depth: int = 0,
+) -> Dict[str, Any]:
+    """Carry everything left in ``source`` over into ``target``, one item at a time.
+
+    Each child is journaled on its own, because undoing a merge means putting those items
+    back where they came from — moving the whole folder back would drag along whatever was
+    already living at the destination.
+    """
+    if depth > MERGE_MAX_DEPTH:
+        return {"status": "failed", "to": target, "error": f"folder nesting deeper than {MERGE_MAX_DEPTH} levels"}
+
+    try:
+        if disk.mkdir(target) == "created":
+            journal_append(journal, {"type": "folder", "path": target})
+    except YandexDiskError as exc:
+        return {"status": "failed", "to": target, "error": str(exc), "code": exc.code}
+
+    failures: List[str] = []
+    try:
+        children = list_top_level(disk, source, STATE_FIELDS + ",_embedded.items.name")
+    except YandexDiskError as exc:
+        return {"status": "failed", "to": target, "error": f"cannot list {source}: {exc}"}
+
+    for child in children:
+        name = child.get("name") or short(child["path"])
+        child_target = join_path(target, name)
+        if child.get("type") == "dir":
+            if disk.exists(child_target):
+                sub = merge_folder(disk, child["path"], child_target, journal, idx, moved_children, verbose, depth + 1)
+            else:
+                sub = move_folder(disk, child["path"], child_target, journal, idx, verbose)
+                if sub["status"] == "moved" and sub.get("whole"):
+                    record = {"from": child["path"], "to": child_target, "kind": "dir"}
+                    moved_children.append(record)
+                    journal_append(journal, dict(record, type="merged", idx=idx))
+            if sub["status"] != "moved":
+                failures.append(f"{name}: {sub.get('error', sub['status'])}")
+            elif verbose:
+                say(f"      merged {name}/")
+            continue
+        outcome = _move_with_fallbacks(disk, child["path"], child_target, identity_of(child))
+        if outcome["status"] == "moved":
+            record = {"from": child["path"], "to": outcome["to"], "size": child.get("size"),
+                      "md5": child.get("md5"), "resource_id": child.get("resource_id")}
+            moved_children.append(record)
+            journal_append(journal, dict(record, type="merged", idx=idx, renamed=outcome.get("renamed", False)))
+            if verbose:
+                say(f"      merged {name}")
+        elif outcome["status"] == "missing":
+            continue  # gone from under us; nothing to carry
+        else:
+            failures.append(f"{name}: {outcome.get('error')}")
+
+    if failures:
+        return {"status": "failed", "to": target, "error": "; ".join(failures[:3]),
+                "moved_children": len(moved_children)}
+
+    # The source should be empty now. Removing it is finishing the move the server started,
+    # not a deletion of the user's data — and it goes to the bin, which is recoverable.
+    emptied = remove_if_empty(disk, source)
+    return {"status": "moved", "to": target, "kind": "dir", "whole": False,
+            "moved_children": len(moved_children), "source_removed": emptied}
+
+
+def remove_if_empty(disk: YandexDisk, path: str) -> bool:
+    try:
+        meta = disk.get(path, limit=1, fields="_embedded.total,path,type")
+    except YandexDiskError:
+        return False
+    if meta.get("type") != "dir" or ((meta.get("_embedded") or {}).get("total") or 0) != 0:
+        return False
+    try:
+        disk.delete(path, permanently=False)
+        return True
+    except YandexDiskError:
+        return False
 
 
 # -- apply -------------------------------------------------------------------
@@ -712,16 +990,22 @@ def cmd_apply(args: argparse.Namespace) -> int:
             identity = identity_of(move)
             folder = parent_of(move["to"])
             before = current.get(move["from"])
+            is_dir = move.get("kind") == "dir"
             if before is None:
                 result: Dict[str, Any] = {"status": "missing", "to": move["to"], "error": "not in the folder any more"}
-            elif not same_file(before, identity):
+            elif is_dir and before.get("type") != "dir":
+                result = {"status": "changed", "to": move["to"], "error": "a file now occupies that name"}
+            elif not is_dir and not same_file(before, identity):
                 result = {"status": "changed", "to": move["to"], "error": "content or type changed since the plan was made"}
             elif any(folder == b or folder.startswith(b + "/") for b in bad_folders):
                 result = {"status": "failed", "to": move["to"], "error": "target folder could not be created"}
             else:
                 journal_append(journal_path, dict(move, type="pending", idx=index - 1))
                 try:
-                    result = _move_with_fallbacks(disk, move["from"], move["to"], identity)
+                    if move.get("kind") == "dir":
+                        result = move_folder(disk, move["from"], move["to"], journal_path, index - 1, args.verbose)
+                    else:
+                        result = _move_with_fallbacks(disk, move["from"], move["to"], identity)
                 except YandexDiskError as exc:
                     result = {"status": "failed", "to": move["to"], "error": str(exc), "code": exc.code}
                 journal_append(journal_path, dict(result, type="result", idx=index - 1))
@@ -732,8 +1016,13 @@ def cmd_apply(args: argparse.Namespace) -> int:
             label = {"moved": "moved   ", "missing": "missing ", "changed": "changed ", "failed": "FAILED  "}[result["status"]]
             suffix = " (renamed)" if result.get("renamed") else ""
             suffix += " (recovered after a lost response)" if result.get("recovered") else ""
+            if result.get("merged"):
+                suffix += f" (merged {result.get('moved_children', 0)} item(s) into an existing folder)"
+            elif result.get("partial_recovered"):
+                suffix += f" (deferred move ended {result.get('operation')}; carried over {result.get('moved_children', 0)} item(s) by hand)"
             detail = f" - {result.get('error')}" if result["status"] != "moved" else ""
-            noteworthy = result["status"] != "moved" or result.get("renamed") or result.get("recovered")
+            noteworthy = (result["status"] != "moved" or result.get("renamed") or result.get("recovered")
+                          or result.get("merged") or result.get("partial_recovered"))
             if args.verbose or index <= VERBOSE_FIRST or noteworthy:
                 say(f"[{index}/{total}] {label} {short(move['from'])} -> {move['folder']}{suffix}{detail}")
             elif index % PROGRESS_EVERY == 0 or index == total:
@@ -790,6 +1079,54 @@ def cmd_undo(args: argparse.Namespace) -> int:
     for index, entry in enumerate(reversed(pending), 1):
         identity = identity_of(entry)
         actual_to = entry.get("actual_to") or entry["to"]
+
+        children = entry.get("merged_children") or []
+        if children:
+            # Undo a merge item by item: the destination folder may hold files that were
+            # there before, and carrying the whole folder back would take them along.
+            back = failed_back = 0
+            for record in reversed(children):
+                if record.get("undone"):
+                    continue
+                if record.get("kind") == "dir":
+                    outcome = move_folder(disk, record["to"], record["from"], journal_path, entry["idx"], args.verbose)
+                else:
+                    outcome = _move_with_fallbacks(disk, record["to"], record["from"], identity_of(record))
+                if outcome["status"] == "moved":
+                    journal_append(journal_path, {"type": "merged_undone", "idx": entry["idx"], "to": record["to"]})
+                    back += 1
+                elif outcome["status"] == "missing":
+                    journal_append(journal_path, {"type": "merged_undone", "idx": entry["idx"], "to": record["to"]})
+                else:
+                    failed_back += 1
+            if failed_back:
+                failed += 1
+                say(f"[{index}/{total}] FAILED   {short(entry['from'])}: {failed_back} of {len(children)} item(s) would not go back")
+            else:
+                journal_append(journal_path, {"type": "undone", "idx": entry["idx"], "restored_to": entry["from"]})
+                restored += 1
+                if args.verbose or index <= VERBOSE_FIRST:
+                    say(f"[{index}/{total}] restored {short(entry['from'])}/ ({back} item(s) carried back)")
+            # Deepest first, so a folder emptied by its children can go too.
+            created = journal.get("folders_created") or []
+            for path in sorted((p for p in created if p == actual_to or p.startswith(actual_to + "/")),
+                               key=lambda p: -p.count("/")):
+                remove_if_empty(disk, path)
+            remove_if_empty(disk, actual_to)
+            continue
+
+        if entry.get("kind") == "dir":
+            outcome = move_folder(disk, actual_to, entry["from"], journal_path, entry["idx"], args.verbose)
+            if outcome["status"] == "moved":
+                journal_append(journal_path, {"type": "undone", "idx": entry["idx"], "restored_to": entry["from"]})
+                restored += 1
+                if args.verbose or index <= VERBOSE_FIRST:
+                    say(f"[{index}/{total}] restored {short(actual_to)}/ -> {entry['from']}")
+            else:
+                journal_append(journal_path, {"type": "undo_error", "idx": entry["idx"], "error": outcome.get("error")})
+                failed += 1
+                say(f"[{index}/{total}] FAILED   {actual_to} - {outcome.get('error')}")
+            continue
         if entry.get("status") == "pending":
             # The run died between sending the move and recording its outcome.
             if landed(disk, entry["from"], actual_to, identity):
@@ -842,6 +1179,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workdir", default=os.environ.get("YADISK_SORT_WORKDIR", DEFAULT_WORKDIR), help="where inventory/plan/journal files live")
     parser.add_argument("--names", choices=("auto", "en", "ru"), default="auto", help="language of the category folder names (auto: Russian if the Downloads folder has a Cyrillic name)")
     parser.add_argument("--rules", help="custom rules JSON (see assets/rules.default.json)")
+    parser.add_argument(
+        "--folders",
+        choices=("content", "group", "skip"),
+        default="content",
+        help="what to do with subfolders: content (default) sorts each into the category its files belong to, "
+             "group puts them all in one Folders/Папки folder, skip leaves them alone",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_check = sub.add_parser("check", help="verify the token and locate the Downloads folder")
