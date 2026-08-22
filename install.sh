@@ -42,9 +42,12 @@ cleanup() {
   rm -f "${TMPFILES[@]}"
   TMPFILES=()
 }
-trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+install_traps() {
+  trap cleanup EXIT
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 143' TERM
+}
+install_traps
 
 # The whole installer lives in main(), invoked on the last line. If the download is cut
 # short, bash never reaches that line, so a partial script cannot half-install anything.
@@ -63,6 +66,7 @@ main() {
   [ -n "${CI:-}" ] && NONINTERACTIVE=1
 
   setup_output
+  [ -n "${HOME:-}" ] && [ -d "${HOME}" ] || abort "HOME is empty or not a directory; nothing can be installed."
   parse_args "$@"
   SKILL_DIR=$(absolute_path "${SKILL_DIR}")
   TOKEN_FILE=$(absolute_path "${TOKEN_FILE}")
@@ -147,9 +151,13 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Symlinks are resolved from the directory that holds them, so a relative target would
 # dangle once it is written into ~/.claude/skills.
 absolute_path() {
+  # The "~/" pattern is quoted on purpose: it matches a literal tilde that arrived inside a
+  # variable (--dir '~/skills'). Unquoted, bash would expand it and the branch could never
+  # match anything.
+  # shellcheck disable=SC2088
   case "$1" in
     /*) printf '%s' "$1" ;;
-    ~/*) printf '%s' "${HOME}/${1#~/}" ;;
+    "~/"*) printf '%s' "${HOME}/${1#"~/"}" ;;
     *) printf '%s' "${PWD}/$1" ;;
   esac
 }
@@ -159,10 +167,16 @@ absolute_path() {
 check_prerequisites() {
   ohai "Checking prerequisites"
 
-  have git || abort "git is required. Install the Xcode Command Line Tools (xcode-select --install) or your distribution's git package."
+  # On macOS /usr/bin/git is a stub that only prompts to install the Command Line Tools, so
+  # ask git to actually do something rather than trusting that the path exists.
+  if ! git --version >/dev/null 2>&1; then
+    abort "git is required, and the git on your PATH does not run. On macOS: xcode-select --install"
+  fi
   ok "git $(git --version 2>/dev/null | awk '{print $3}')"
 
-  have curl || abort "curl is required."
+  if ! curl --version >/dev/null 2>&1; then
+    abort "curl is required, and the curl on your PATH does not run."
+  fi
   ok "curl"
 
   if have python3 && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
@@ -274,26 +288,29 @@ install_token() {
   fi
 
   token="${YANDEX_DISK_TOKEN:-}"
+  unset YANDEX_DISK_TOKEN  # do not pass the secret on to git, curl, python or the skill
 
   if [ -z "${token}" ] && [ -s "${TOKEN_FILE}" ]; then
     if [ -n "${NONINTERACTIVE}" ] || ! can_prompt; then
       ok "${TOKEN_FILE} already has a token; keeping it"
+      tighten_token_file
       return 0
     fi
     printf "    %s already contains a token. Replace it? [y/N] " "${TOKEN_FILE}" > /dev/tty
     IFS= read -r answer < /dev/tty || answer=""
     case "${answer}" in
       y|Y|yes|YES) : ;;
-      *) ok "keeping the existing token"; return 0 ;;
+      *) ok "keeping the existing token"; tighten_token_file; return 0 ;;
     esac
   fi
 
   if [ -z "${token}" ]; then
     if [ -n "${NONINTERACTIVE}" ] || ! can_prompt; then
       warn "no terminal to ask for a token"
-      info "get one as described at ${POLIGON_URL}, then run:"
-      info "  printf '%s' 'y0_your_token' > ${TOKEN_FILE} && chmod 600 ${TOKEN_FILE}"
-      info "or re-run this installer with YANDEX_DISK_TOKEN=y0_... in the environment"
+      info "get one as described at ${POLIGON_URL}, then run this, which reads the token"
+      info "from the keyboard and so keeps it out of your shell history:"
+      info "  (umask 077; read -rs t && printf '%s' \"\$t\" > ${TOKEN_FILE}); unset t"
+      info "or re-run this installer from a terminal"
       return 0
     fi
     print_token_instructions
@@ -301,9 +318,9 @@ install_token() {
     # read -s turns echo off; a Ctrl-C in the middle would otherwise leave the terminal
     # silent for every command the user types afterwards.
     stty_state=$(stty -g < /dev/tty 2>/dev/null || true)
-    trap 'restore_tty "${stty_state}"; printf "\n" > /dev/tty 2>/dev/null; exit 130' INT TERM
+    trap 'restore_tty "${stty_state}"; cleanup; printf "\n" > /dev/tty 2>/dev/null; exit 130' INT TERM
     IFS= read -rs token < /dev/tty || token=""
-    trap - INT TERM
+    install_traps  # back to the plain cleanup handlers, not to bash's defaults
     restore_tty "${stty_state}"
     printf "\n" > /dev/tty
   fi
@@ -313,22 +330,25 @@ install_token() {
 
   if [ -z "${token}" ]; then
     warn "no token entered; the skill is installed but cannot talk to Yandex yet"
-    info "when you have one: printf '%s' 'y0_...' > ${TOKEN_FILE} && chmod 600 ${TOKEN_FILE}"
+    info "when you have one, re-run this installer, or paste it without leaving it in history:"
+    info "  (umask 077; read -rs t && printf '%s' \"\$t\" > ${TOKEN_FILE}); unset t"
     return 0
   fi
 
-  info "got $(mask_token "${token}")"
+  if can_prompt; then printf "    got %s\n" "$(mask_token "${token}")" > /dev/tty; else info "got $(mask_token "${token}")"; fi
   check_token_shape "${token}"
 
-  if verify_token "${token}"; then
-    write_token "${token}"
-  elif [ -s "${TOKEN_FILE}" ]; then
-    # Replacing a token that works with one the server just refused would be a downgrade.
-    warn "keeping the token already in ${TOKEN_FILE}; the new one was not accepted"
-    info "to force it anyway: printf '%s' 'y0_...' > ${TOKEN_FILE}"
+  verify_token "${token}"
+  verdict=$?
+  if [ "${verdict}" -eq 1 ] && [ -s "${TOKEN_FILE}" ]; then
+    # Only an outright rejection blocks the write: replacing a token that works with one
+    # the server refused would be a downgrade. A network failure proves nothing.
+    warn "keeping the token already in ${TOKEN_FILE}; Yandex refused the new one"
+    info "to store it anyway, run this installer again when the token is right"
+    tighten_token_file
   else
     write_token "${token}"
-    info "saved anyway — fix or replace it later if Yandex keeps refusing it"
+    [ "${verdict}" -eq 0 ] || info "saved without a successful check"
   fi
   unset token
 }
@@ -388,11 +408,13 @@ verify_token() {
     # curl exits 22 for an HTTP error (with -f) and 6/7/28/35 for DNS, connection and TLS
     # trouble — worth telling apart, because the remedies are nothing alike.
     case "${status}" in
-      22) warn "Yandex refused the token: it is wrong, expired or revoked. Get a fresh one at ${POLIGON_URL}" ;;
-      6|7|28|35) warn "could not reach ${API_URL} (exit ${status}); the token itself was not checked" ;;
-      *) warn "the token check failed (curl exit ${status}); the token itself may still be fine" ;;
+      22)
+        warn "Yandex refused the token: it is wrong, expired or revoked. Get a fresh one at ${POLIGON_URL}"
+        return 1 ;;
+      *)
+        warn "could not check the token (curl exit ${status}); the token itself may be fine"
+        return 2 ;;  # unreachable, not refused
     esac
-    return 1
   fi
 
   login=$(printf '%s' "${body}" | extract_json_field "login")
@@ -437,16 +459,31 @@ if isinstance(total, int) and isinstance(used, int):
   fi
 }
 
+# A token file left readable by others is worth fixing even when we did not write it.
+tighten_token_file() {
+  [ -f "${TOKEN_FILE}" ] || return 0
+  mode=$(file_mode "${TOKEN_FILE}")
+  case "${mode}" in
+    600|400) : ;;
+    *) chmod 600 "${TOKEN_FILE}" 2>/dev/null && info "tightened ${TOKEN_FILE} from mode ${mode} to 600" ;;
+  esac
+}
+
 write_token() {
-  # umask makes the file 0600 the moment it is created; chmod afterwards would leave a
-  # window in which the token is world-readable.
+  # Remove first: umask applies to creation only, so writing into an existing 0644 file
+  # would put the token there at 0644 and only tighten it afterwards.
+  rm -f "${TOKEN_FILE}"
   ( umask 077; printf '%s' "$1" > "${TOKEN_FILE}" ) || abort "cannot write ${TOKEN_FILE}"
   chmod 600 "${TOKEN_FILE}" 2>/dev/null
   ok "token saved to ${TOKEN_FILE} (mode $(file_mode "${TOKEN_FILE}"))"
 }
 
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || echo "600"
+  # -L follows symlinks: the mode that matters is the file's, not the link's (links are
+  # 0777 on Linux and 0755 on macOS, and copying that onto a settings file would be bad).
+  stat -L -c '%a' "$1" 2>/dev/null ||
+    stat -L -f '%Lp' "$1" 2>/dev/null ||
+    printf '600'
 }
 
 # -- Claude Code settings -----------------------------------------------------
