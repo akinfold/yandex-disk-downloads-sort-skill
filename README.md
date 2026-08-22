@@ -49,45 +49,152 @@ tests/                               unit and end-to-end tests against an in-mem
 .claude-plugin/, .codex-plugin/      plugin manifests (+ marketplace catalog) for Claude Code and Codex/ChatGPT
 ```
 
-Requirements: Python 3.9+ (standard library only) and outbound HTTPS to `cloud-api.yandex.net`.
+## 1. Get a Yandex Disk OAuth token
 
-## 1. Get a Yandex Disk OAuth token (2 minutes)
+The scripts talk to the Yandex Disk REST API with your own OAuth token, sent as
+`Authorization: OAuth <token>`. Nothing is proxied through a third party. Two ways to get one;
+the first needs no registration and takes about two minutes.
 
-1. Sign in to Yandex, open the Poligon: https://yandex.ru/dev/disk/poligon/
-2. Click **"Получить OAuth-токен"** ("Get OAuth token") next to the **"Ваш OAuth-токен"** field,
-   allow access, and the token appears in that field. Copy it (`y0_…`).
-3. Give it to the skill:
+### Option A: the Poligon page (quickest)
 
-   ```bash
-   export YANDEX_DISK_TOKEN='y0_…'
-   ```
+[Poligon](https://yandex.ru/dev/disk/poligon/) is Yandex's own interactive console for the Disk
+API. Its "get token" button runs a normal OAuth authorization for a Yandex-registered
+application, and the token it issues is an ordinary OAuth token that works from any script.
 
-   or save it to a file and pass `--token-file ~/.yandex-disk-token`.
+1. Sign in to the Yandex account whose Disk you want to sort
+   ([passport.yandex.ru](https://passport.yandex.ru)). On a shared computer use a private window.
+2. Open **https://yandex.ru/dev/disk/poligon/** (English mirror:
+   https://yandex.com/dev/disk/poligon/) and dismiss the cookie banner if it appears.
+3. At the top of the console there is a field **"Ваш OAuth-токен"** ("Your OAuth token") and a
+   yellow button **"Получить OAuth-токен"** ("Get OAuth token"). Click the button.
+4. Log in if asked, then click **"Разрешить"** ("Allow") on the consent screen. If you
+   authorized Poligon before and that token has not expired, the screen is skipped.
+5. You are redirected back and the token appears in the **"Ваш OAuth-токен"** field. Copy it.
+   A token looks like `y0_AgAAAAA…`: it starts with `y`, a digit and `_`, is about 58 characters
+   long, and contains only letters, digits, `_` and `-`.
 
-The full guide, including registering your own OAuth app, token lifetime and revocation, is in
+### Option B: your own OAuth application
+
+Choose this to control the token independently of Poligon, pick exact scopes, or get refresh
+tokens.
+
+1. Open https://oauth.yandex.ru/client/new/ and pick **"Для доступа к API или отладки"**
+   (for API access or debugging). The type cannot be changed later.
+2. Fill in **"Название вашего сервиса"** (service name) and **"Контактная почта"** (contact email).
+3. Under permissions, type "Диск" and add:
+   - `cloud_api:disk.read` — read the whole Disk
+   - `cloud_api:disk.write` — write anywhere on the Disk
+   - `cloud_api:disk.info` — quota and system folders
+
+   `cloud_api:disk.app_folder` alone confines the app to its own folder and is **not** enough
+   to sort Downloads.
+4. The Redirect URI is fixed to `https://oauth.yandex.ru/verification_code`. Click
+   **"Создать приложение"** and copy the **ClientID**.
+5. Open `https://oauth.yandex.ru/authorize?response_type=token&client_id=<ClientID>`, click
+   **"Разрешить"**, and copy `access_token` from the resulting
+   `…/verification_code#access_token=<token>&expires_in=<seconds>` URL.
+
+### Give the token to the skill
+
+The scripts look for it in this order: `--token-file <path>`, `YANDEX_DISK_TOKEN`,
+`YANDEX_DISK_OAUTH_TOKEN`, then the file named by `YANDEX_DISK_TOKEN_FILE`.
+
+```bash
+# current shell session
+export YANDEX_DISK_TOKEN='y0_your_token_here'
+```
+
+```bash
+# or a file, so agents can read it without the token living in your environment
+printf '%s' 'y0_your_token_here' > ~/.yandex-disk-token && chmod 600 ~/.yandex-disk-token
+export YANDEX_DISK_TOKEN_FILE=~/.yandex-disk-token   # or pass --token-file ~/.yandex-disk-token
+```
+
+For Claude Code, Codex and similar, put the `export` in your shell profile or in the `.env`
+your launcher loads — never in a file inside a repository. For the ChatGPT action, paste
+`OAuth y0_…` as the API key (see [chatgpt/README.md](chatgpt/README.md)). The scripts never
+print the token.
+
+Verify it works:
+
+```bash
+curl -sS -H "Authorization: OAuth $YANDEX_DISK_TOKEN" https://cloud-api.yandex.net/v1/disk
+```
+
+A `200` with JSON (`total_space`, `system_folders`, …) means you are set. A
+`401 UnauthorizedError` means the token is wrong, expired or revoked — note that Yandex
+requires the `OAuth` scheme, so `Bearer` will not work.
+
+**Lifetime and revocation.** Yandex tokens are typically valid up to a year (the exact value is
+`expires_in` in the redirect URL); when one expires, repeat the steps. Revoke a token at
+[id.yandex.ru/personal/data-access](https://id.yandex.ru/personal/data-access) by removing the
+application. Changing your password, toggling two-factor authentication, or "log out
+everywhere" revokes every token.
+
+The longer guide (device flow, refresh tokens, error table) is in
 [references/oauth-token.md](skills/yandex-disk-downloads-sort/references/oauth-token.md).
 
 ## 2. Install the skill
 
-Everything lives in one folder, `skills/yandex-disk-downloads-sort`. Clone the repository and
-point your tool at that folder (symlinks are followed by all of them):
+Everything lives in one folder, `skills/yandex-disk-downloads-sort`. Clone the repository once,
+then point your tool at that folder — all of these tools follow symlinks, so one checkout can
+serve every one of them:
 
 ```bash
 git clone https://github.com/akinfold/yandex-disk-downloads-sort-skill.git
+cd yandex-disk-downloads-sort-skill
 ```
 
-| Tool | Where the folder goes |
-|---|---|
-| **Claude Code** (personal) | `ln -s "$PWD/yandex-disk-downloads-sort-skill/skills/yandex-disk-downloads-sort" ~/.claude/skills/yandex-disk-downloads-sort` |
-| **Claude Code** (one project) | `.claude/skills/yandex-disk-downloads-sort/` inside the project |
-| **Claude Code** (as a plugin) | `/plugin marketplace add akinfold/yandex-disk-downloads-sort-skill`, then `/plugin install yandex-disk-downloads-sort@akinfold-skills`; or for a local checkout `claude --plugin-dir ./yandex-disk-downloads-sort-skill` |
-| **OpenAI Codex** CLI / IDE, **ChatGPT desktop app** | `ln -s … ~/.agents/skills/yandex-disk-downloads-sort` (project-level `.agents/skills/` also works; the older `~/.codex/skills/` still loads) |
-| **Cursor, GitHub Copilot, Hermes Agent** and other Agent-Skills clients | `.agents/skills/yandex-disk-downloads-sort/` |
-| **Claude.ai / Claude Cowork** | zip the folder so that the folder is the zip root (`cd skills && zip -r ../yandex-disk-downloads-sort.zip yandex-disk-downloads-sort`); in claude.ai enable *Code execution and file creation* under Settings → Capabilities, then Customize → Skills → create/upload a skill from the zip. See the network note below. |
-| **ChatGPT on the web** | a Custom GPT with an action: [chatgpt/README.md](chatgpt/README.md) |
+**Claude Code** — as a personal skill:
 
-Then ask: *"Check my Yandex Disk Downloads folder"*. The skill triggers on mentions of Yandex
-Disk together with Downloads/Загрузки, cleaning up, sorting, duplicates or free space.
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/yandex-disk-downloads-sort" ~/.claude/skills/yandex-disk-downloads-sort
+```
+
+**Claude Code** — as a plugin (the repository ships a marketplace catalog):
+
+```
+/plugin marketplace add akinfold/yandex-disk-downloads-sort-skill
+/plugin install yandex-disk-downloads-sort@akinfold-skills
+```
+
+For a local checkout without the marketplace: `claude --plugin-dir .`
+
+**OpenAI Codex** (CLI, IDE extension, ChatGPT desktop app), **Cursor**, **GitHub Copilot**,
+**Hermes Agent** and other Agent-Skills clients:
+
+```bash
+mkdir -p ~/.agents/skills
+ln -s "$PWD/skills/yandex-disk-downloads-sort" ~/.agents/skills/yandex-disk-downloads-sort
+```
+
+Project-scoped installs work too: copy or symlink the folder into `.claude/skills/` or
+`.agents/skills/` inside the project.
+
+**Claude.ai / Claude Cowork** — upload a zip whose root is the skill folder:
+
+```bash
+cd skills && zip -r ../yandex-disk-downloads-sort.zip yandex-disk-downloads-sort && cd ..
+```
+
+In claude.ai enable *Code execution and file creation* under Settings → Capabilities, then go
+to Customize → Skills and create a skill from that zip.
+
+**ChatGPT on the web** cannot run the scripts (its code interpreter has no network), so use the
+Custom GPT action instead: [chatgpt/README.md](chatgpt/README.md).
+
+### Check the install
+
+```bash
+python3 skills/yandex-disk-downloads-sort/scripts/downloads_sort.py check
+```
+
+This prints the detected Downloads folder, the file count and your quota. Then ask your agent:
+*"Check my Yandex Disk Downloads folder"*. The skill triggers on mentions of Yandex Disk
+together with Downloads/Загрузки, cleaning up, sorting, duplicates or free space.
+
+Requirements: Python 3.9+ and nothing else — the scripts use only the standard library.
 
 ### Where the scripts can actually reach Yandex
 
