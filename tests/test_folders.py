@@ -243,3 +243,170 @@ class FolderIdempotencyTests(helpers.FakeServerTest):
         self.assertEqual(self.load("plan.json")["moves"], [])
         self.assertIn("disk:/Загрузки/Изображения/Отпуск/p.jpg", self.fake.tree)
         self.assertNotIn("disk:/Загрузки/Изображения/Изображения", self.fake.tree)
+
+
+class DuplicateFolderTests(helpers.FakeServerTest):
+    """Two folders holding exactly the same bytes, found without scanning everything."""
+
+    def run_cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ds.main(["--workdir", self.workdir, *argv])
+        return code, buf.getvalue()
+
+    def load(self, name):
+        with open(os.path.join(self.workdir, name), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def twins(self, a, b, contents):
+        for folder in (a, b):
+            self.fake.add_dir(f"{self.downloads}/{folder}")
+            for name, md5, size in contents:
+                self.fake.add_file(f"{self.downloads}/{folder}/{name}", size, md5=md5, media_type="video")
+
+    def test_identical_folders_are_found_and_quarantined(self):
+        contents = [("a.mp4", "h1", 1000), ("b.mp4", "h2", 2000)]
+        self.twins("DRAFTS", "DRAFTS (1)", contents)
+        self.run_cli("analyze")
+        inv = self.load("inventory.json")
+        self.assertEqual(len(inv["duplicate_folders"]), 1)
+        group = inv["duplicate_folders"][0]
+        self.assertTrue(group["keep"].endswith("/DRAFTS"))
+        self.assertEqual(group["extra"], [f"{self.downloads}/DRAFTS (1)"])
+        self.assertEqual(group["reclaimable"], 3000)
+
+        self.run_cli("plan", "--min-age-minutes", "0")
+        plan = self.load("plan.json")
+        targets = {m["from"].rsplit("/", 1)[-1]: m["folder"] for m in plan["moves"]}
+        self.assertEqual(targets["DRAFTS (1)"], "_Дубликаты")
+        self.assertEqual(targets["DRAFTS"], "Видео")
+
+        code, out = self.run_cli("apply", "--yes")
+        self.assertEqual(code, 0, out)
+        self.assertIn("disk:/Загрузки/_Дубликаты/DRAFTS (1)/a.mp4", self.fake.tree)
+        self.assertIn("disk:/Загрузки/Видео/DRAFTS/a.mp4", self.fake.tree)
+
+    def test_folders_that_only_look_alike_are_not_called_duplicates(self):
+        # Same file names, one differing checksum: not the same folder.
+        self.twins("Копия A", "Копия B", [("a.mp4", "h1", 1000), ("b.mp4", "h2", 2000)])
+        self.fake.tree[f"{self.downloads}/Копия B/b.mp4"]["md5"] = "different"
+        self.run_cli("analyze")
+        self.assertEqual(self.load("inventory.json")["duplicate_folders"], [])
+
+    def test_different_names_inside_are_not_even_candidates(self):
+        self.fake.add_dir(f"{self.downloads}/One")
+        self.fake.add_file(f"{self.downloads}/One/a.mp4", 10, md5="h", media_type="video")
+        self.fake.add_dir(f"{self.downloads}/Two")
+        self.fake.add_file(f"{self.downloads}/Two/b.mp4", 10, md5="h", media_type="video")
+        self.run_cli("analyze")
+        inv = self.load("inventory.json")
+        self.assertEqual(inv["duplicate_folders"], [])
+        # The cheap signature differs, so neither folder was scanned a second time.
+        self.assertFalse(any(f.get("full_scan") for f in inv["folders"]))
+
+    def test_folders_are_listed_once_and_not_read_twice(self):
+        for i in range(6):
+            self.fake.add_dir(f"{self.downloads}/f{i}")
+            self.fake.add_file(f"{self.downloads}/f{i}/uniq{i}.mp4", 10, md5=f"m{i}", media_type="video")
+        self.twins("T", "T copy", [("same.mp4", "same-hash", 100)])
+        self.run_cli("analyze")
+        inv = self.load("inventory.json")
+        self.assertEqual(len(inv["duplicate_folders"]), 1)
+        # A folder small enough to be read whole already has its fingerprint, so the
+        # comparison pass costs nothing extra: nothing is read a second time.
+        self.assertFalse([f["name"] for f in inv["folders"] if f.get("full_scan")])
+        listings = [q.get("path") for m, p, q in self.fake.log if p == "/v1/disk/resources" and m == "GET"]
+        for name in ("f0", "T", "T copy"):
+            self.assertEqual(listings.count(f"{self.downloads}/{name}"), 1, name)
+
+    def test_a_folder_too_big_to_scan_is_never_called_a_duplicate(self):
+        contents = [(f"f{i}.mp4", f"h{i}", 10) for i in range(3)]
+        self.twins("Big", "Big (1)", contents)
+        rules = json.load(open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "skills/yandex-disk-downloads-sort/assets/rules.default.json"), encoding="utf-8"))
+        rules["folder_rules"]["max_scan_items"] = 2  # forces truncation
+        path = os.path.join(self.workdir, "tiny-rules.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(rules, handle, ensure_ascii=False)
+        self.run_cli("--rules", path, "analyze")
+        inv = self.load("inventory.json")
+        # The full second pass still runs for candidates, so they are compared properly.
+        self.assertEqual(len(inv["duplicate_folders"]), 1)
+
+    def test_deep_duplicates_reports_files_inside_folders_without_moving_them(self):
+        self.fake.add_dir(f"{self.downloads}/Проект")
+        self.fake.add_file(f"{self.downloads}/Проект/report.pdf", 500, md5="same", media_type="document")
+        self.fake.add_dir(f"{self.downloads}/Проект/Копии")
+        self.fake.add_file(f"{self.downloads}/Проект/Копии/report.pdf", 500, md5="same", media_type="document")
+        code, out = self.run_cli("analyze", "--deep-duplicates")
+        self.assertEqual(code, 0)
+        inv = self.load("inventory.json")
+        self.assertEqual(len(inv["inner_duplicates"]), 1)
+        self.assertEqual(inv["inner_duplicates"][0]["reclaimable"], 500)
+        self.assertIn("only reported", out)
+        # Nothing inside a folder is ever planned for a move.
+        self.run_cli("plan", "--min-age-minutes", "0")
+        plan = self.load("plan.json")
+        self.assertTrue(all("/Проект/" not in m["from"] for m in plan["moves"]))
+
+
+class NestedDuplicateTests(helpers.FakeServerTest):
+    """Identical folders that a previous run already tucked away under a category."""
+
+    def run_cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ds.main(["--workdir", self.workdir, *argv])
+        return code, buf.getvalue()
+
+    def load(self, name):
+        with open(os.path.join(self.workdir, name), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_identical_folders_deeper_in_the_tree_are_reported_not_moved(self):
+        d = self.downloads
+        # Exactly the shape a sorted disk ends up in: the twins live inside Видео.
+        for twin in ("DRAFTS", "DRAFTS (1)"):
+            self.fake.add_dir(f"{d}/Видео/{twin}")
+            for i in range(3):
+                self.fake.add_file(f"{d}/Видео/{twin}/clip{i}.mp4", 1000, md5=f"h{i}", media_type="video")
+        code, out = self.run_cli("analyze")
+        self.assertEqual(code, 0)
+        inv = self.load("inventory.json")
+        self.assertEqual(len(inv["nested_duplicate_folders"]), 1)
+        group = inv["nested_duplicate_folders"][0]
+        self.assertEqual(group["keep"], f"{d}/Видео/DRAFTS")
+        self.assertEqual(group["extra"], [f"{d}/Видео/DRAFTS (1)"])
+        self.assertEqual(group["reclaimable"], 3000)
+        self.assertIn("Only reported", out)
+
+        # Nothing inside a folder is touched, and Видео itself stays put.
+        self.run_cli("plan", "--min-age-minutes", "0")
+        plan = self.load("plan.json")
+        self.assertEqual(plan["moves"], [])
+        self.assertIn("destinations", {s["path"]: s["reason"] for s in plan["skipped"]}[f"{d}/Видео"])
+
+    def test_a_truncated_scan_never_claims_two_folders_are_identical(self):
+        d = self.downloads
+        for twin in ("A", "B"):
+            self.fake.add_dir(f"{d}/Видео/{twin}")
+            for i in range(3):
+                self.fake.add_file(f"{d}/Видео/{twin}/c{i}.mp4", 10, md5=f"h{i}", media_type="video")
+        rules = json.load(open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "skills/yandex-disk-downloads-sort/assets/rules.default.json"), encoding="utf-8"))
+        rules["folder_rules"]["max_scan_items"] = 2  # the scan cannot see the whole tree
+        path = os.path.join(self.workdir, "tiny.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(rules, handle, ensure_ascii=False)
+        self.run_cli("--rules", path, "analyze")
+        self.assertEqual(self.load("inventory.json")["nested_duplicate_folders"], [])
+
+    def test_the_report_says_destination_folders_stay(self):
+        d = self.downloads
+        self.fake.add_dir(f"{d}/Документы")
+        self.fake.add_file(f"{d}/Документы/a.pdf", 10, media_type="document")
+        _, out = self.run_cli("analyze")
+        self.assertIn("already one of the sorting destinations", out)
+        self.assertNotIn("| `Документы` | 1 | `Документы`", out)

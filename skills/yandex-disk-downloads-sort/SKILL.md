@@ -1,11 +1,11 @@
 ---
 name: yandex-disk-downloads-sort
-description: Analyzes and tidies the Downloads folder ("Загрузки") on Yandex Disk through the Yandex Disk REST API. Inventories every file and subfolder, reports what is there by type, size and age, finds exact duplicates, partial downloads and stray installers, then sorts files and whole subfolders into category folders (Documents, Images, Screenshots, Archives, Installers, ...) with a reviewable dry-run plan, no overwrites, no deletes, and an undo journal. Use this whenever the user mentions Yandex Disk / Яндекс Диск / Я.Диск together with Downloads / Загрузки, a cluttered cloud folder, cleaning up, sorting, organizing, "what is in my Downloads", duplicates, or freeing space on Yandex Disk, even if they never say "sort". Needs a Yandex OAuth token in YANDEX_DISK_TOKEN (see references/oauth-token.md to get one in two minutes).
+description: Analyzes and tidies the Downloads folder ("Загрузки") on Yandex Disk through the Yandex Disk REST API. Inventories every file and subfolder, reports what is there by type, size and age, finds exact duplicates (files and whole folders), partial downloads and stray installers, then sorts files and whole subfolders into category folders (Documents, Images, Screenshots, Archives, Installers, ...) with a reviewable dry-run plan, no overwrites, no deletes, and an undo journal. Use this whenever the user mentions Yandex Disk / Яндекс Диск / Я.Диск together with Downloads / Загрузки, a cluttered cloud folder, cleaning up, sorting, organizing, "what is in my Downloads", duplicates, or freeing space on Yandex Disk, even if they never say "sort". Needs a Yandex OAuth token in YANDEX_DISK_TOKEN (see references/oauth-token.md to get one in two minutes).
 license: MIT
 compatibility: Python 3.9+ (standard library only) and outbound HTTPS to cloud-api.yandex.net. Works in Claude Code, Claude Cowork, OpenAI Codex and any agent that can run scripts; for ChatGPT use the Custom GPT action in chatgpt/ of the repository instead.
 metadata:
   author: Roman Akinfeev
-  version: "1.1.0"
+  version: "1.2.0"
   repository: https://github.com/akinfold/yandex-disk-downloads-sort-skill
 ---
 
@@ -57,7 +57,8 @@ python scripts/downloads_sort.py analyze
 ```
 
 Lists what sits directly inside Downloads — both files and subfolders — classifies each one
-and prints a markdown report: proposed categories with counts and sizes, exact duplicates (same md5 and size),
+and prints a markdown report: proposed categories with counts and sizes, exact duplicates — both files (same md5
+and size) and whole folders (same files, checksums and arrangement) —
 look-alike names with different content, partial downloads that will be skipped, sensitive
 files (keys, certificates), the largest and oldest files, and extension statistics. It also
 writes `inventory.json` and `report.md` to the workdir.
@@ -135,9 +136,13 @@ it has nothing left to undo, older journals that still do are listed.
 - **"Don't touch my folders."** → `--folders skip`. **"Put all folders in one place."** →
   `--folders group`.
 - **"Only the screenshots / only the PDFs."** → `plan --only screenshots` or `--only documents`.
-- **"Find duplicates."** → `analyze`; the duplicates section has the groups. Sorting with
-  `--duplicates quarantine` parks the copies in one folder; the user deletes them by hand
-  (the scripts never delete files, by design).
+- **"Find duplicates."** → `analyze`. It reports duplicate files, duplicate top-level folders
+  (identical contents: the plan keeps one and parks the copies in the duplicates folder), and
+  identical folders nested deeper, which are reported but never rearranged — what is inside a
+  folder is the user's business. `analyze --deep-duplicates` reads every subfolder in full and
+  also reports duplicate files living inside them; it costs a request per 200 files, so offer
+  it rather than defaulting to it. Deleting is always the user's call: the scripts never delete
+  files.
 - **"Free up space."** → `analyze`; point at the largest files, duplicates and old
   installers/disk images. Deletion is the user's call and happens in the Disk UI or with
   `scripts/yadisk_api.py` if they explicitly ask.

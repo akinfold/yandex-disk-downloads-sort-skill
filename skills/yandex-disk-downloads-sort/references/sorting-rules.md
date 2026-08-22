@@ -97,6 +97,26 @@ duplicates folder, and refuses to move a folder into a path inside itself.
 costs no extra API calls. `--folders skip` restores the pre-1.1 behaviour of leaving folders
 alone entirely.
 
+## Duplicate folders
+
+Two folders are duplicates when their contents are identical: same relative paths, same md5,
+same sizes. Comparing every pair properly would mean reading every folder in full, so the
+work is done in two steps. Every folder gets a cheap signature from the listing the
+classification pass already made — the names and types of its immediate children — and only
+folders that collide there are read in full. A folder small enough to be scanned whole
+already has its fingerprint, so in practice the second read almost never happens.
+
+A folder whose scan was cut short is never called a duplicate: a fingerprint that silently
+ignored unseen files would be a lie. Empty folders are not duplicates of each other either.
+
+- **Top-level duplicates** are treated like duplicate files: the cleanest-named one keeps its
+  category, the copies go to the duplicates folder.
+- **Nested duplicates** — identical folders found deeper in the tree, typically because an
+  earlier run tucked both under the same category — are reported with the space they waste,
+  and left where they are.
+- `analyze --deep-duplicates` reads every subfolder in full and additionally reports duplicate
+  files inside folders. Also report-only.
+
 ## Things the rules do not decide
 
 - **Date subfolders** come from `plan --by-date year|month`, not from the rules. The date

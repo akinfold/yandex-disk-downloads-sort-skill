@@ -57,8 +57,11 @@ installer and follow [the manual steps](#1-get-a-yandex-disk-oauth-token).
   go to `Folders`/`Папки`. Folder moves happen in the background on Yandex's side and can stop
   halfway, so each one is verified afterwards and any remainder is merged into the destination
   by hand. `--folders skip` leaves folders alone.
-- Detects exact duplicates (same `md5` and size), keeps the cleanest-named copy and parks the
-  rest in `_Duplicates` / `_Дубликаты`; reports look-alike names with different content.
+- Detects exact duplicates — files by `md5` and size, and whole folders by their contents —
+  keeps the cleanest-named copy and parks the rest in `_Duplicates` / `_Дубликаты`. Identical
+  folders nested deeper are reported with the space they waste, never rearranged.
+  `analyze --deep-duplicates` reads every subfolder in full and reports duplicate files inside
+  them too.
 - **Never deletes, never overwrites** (name clashes get a ` (2)` suffix), never enters
   subfolders, skips partial downloads and files modified minutes ago, re-checks each file's
   identity right before moving it, and writes every move to an append-only journal before

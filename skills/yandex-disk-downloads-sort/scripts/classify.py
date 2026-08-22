@@ -17,6 +17,7 @@ Resolution order, most specific first:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -363,6 +364,67 @@ def find_name_lookalikes(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
             continue  # exact duplicates are handled elsewhere
         out.append({"base": base, "items": sorted(members, key=lambda m: str(m.get("name")))})
     out.sort(key=lambda g: g["base"])
+    return out
+
+
+# -- duplicate folders ------------------------------------------------------
+
+
+def shallow_signature(children: Iterable[Dict[str, Any]]) -> str:
+    """A cheap signature from one listing: what the folder's immediate children are called.
+
+    Two folders that hold the same thing must agree here, so this filters candidates for
+    the expensive comparison without a single extra request.
+    """
+    names = sorted(
+        f"{'d' if c.get('type') == 'dir' else 'f'}:{c.get('name')}" for c in children
+    )
+    return hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
+
+
+def tree_fingerprint(files: Iterable[Dict[str, Any]], root: str) -> Optional[str]:
+    """Identity of a folder's contents: every file's place, checksum and size.
+
+    Returns ``None`` when any file lacks an md5, because a fingerprint that quietly
+    ignores an unknown file would call two different folders identical.
+    """
+    parts = []
+    for item in files:
+        md5 = item.get("md5")
+        size = item.get("size")
+        path = str(item.get("path") or "")
+        if not md5 or not isinstance(size, int):
+            return None
+        relative = path[len(root):] if path.startswith(root) else path
+        parts.append(f"{relative}\0{md5}\0{size}")
+    if not parts:
+        return None  # an empty folder is not "the same" as another empty folder
+    parts.sort()
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def find_duplicate_folders(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group folders whose fingerprints match. The keeper is the cleanest-named one."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        fingerprint = record.get("fingerprint")
+        if fingerprint:
+            groups.setdefault(fingerprint, []).append(record)
+    out = []
+    for fingerprint, members in groups.items():
+        if len(members) < 2:
+            continue
+        members = sorted(members, key=_keeper_key)
+        size = int(members[0].get("size") or 0)
+        out.append({
+            "fingerprint": fingerprint,
+            "size": size,
+            "files": members[0].get("files", 0),
+            "keep": members[0],
+            "extra": members[1:],
+            "reclaimable": size * (len(members) - 1),
+        })
+    out.sort(key=lambda g: -g["reclaimable"])
     return out
 
 

@@ -1,7 +1,7 @@
 {
   "name": "yandex-disk-downloads-sort",
   "description": "Analyze and sort the Downloads folder on Yandex Disk through the Yandex Disk REST API: inventory, duplicates, reviewable plan, safe moves, undo.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "Roman Akinfeev",
     "url": "https://github.com/akinfold"

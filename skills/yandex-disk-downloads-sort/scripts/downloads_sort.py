@@ -58,6 +58,7 @@ VERBOSE_FIRST = 40      # apply/undo print every move up to this many...
 PROGRESS_EVERY = 50     # ...then one progress line per this many (agent harnesses truncate long output)
 SUMMARY_ROWS = 40       # plan summary table rows; the rest is in plan.json
 MERGE_MAX_DEPTH = 16    # refuse to recurse forever when merging a partially moved folder
+DEEP_SCAN_DEPTH = 64    # depth cap when reading a folder in full to fingerprint it
 FOLDER_SCAN_FIELDS = ",".join(f"_embedded.items.{f}" for f in ("name", "path", "type", "size", "media_type", "md5", "resource_id")) + ",_embedded.total,_embedded.limit,_embedded.offset"
 JOURNAL_VERSION = 2
 
@@ -277,6 +278,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         verdict = cls.classify(item, rules, lang)
         item["verdict"] = verdict.as_dict()
     folders = [] if args.folders == "skip" else scan_folders(disk, items, rules, lang)
+    duplicate_folders = find_duplicate_folders(disk, folders, deep=args.deep_duplicates)
+    nested_duplicates = find_nested_duplicate_folders(folders)
+    inner_duplicates = find_inner_duplicates(folders) if args.deep_duplicates else []
     duplicates = cls.find_exact_duplicates(files)
     lookalikes = cls.find_name_lookalikes(files)
 
@@ -290,6 +294,18 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         "folders": folders,
         "folder_names": [i.get("name") for i in items if i.get("type") == "dir"],
         "files": files,
+        "duplicate_folders": [
+            {
+                "size": g["size"],
+                "files": g["files"],
+                "reclaimable": g["reclaimable"],
+                "keep": g["keep"]["path"],
+                "extra": [e["path"] for e in g["extra"]],
+            }
+            for g in duplicate_folders
+        ],
+        "nested_duplicate_folders": nested_duplicates,
+        "inner_duplicates": inner_duplicates,
         "duplicates": [
             {"md5": g["md5"], "size": g["size"], "keep": g["keep"]["path"], "extra": [e["path"] for e in g["extra"]]}
             for g in duplicates
@@ -317,19 +333,135 @@ def scan_folders(disk: YandexDisk, items: List[Dict[str, Any]], rules: cls.Rules
     for item in items:
         if item.get("type") != "dir":
             continue
-        contents, truncated = scan_tree(disk, item["path"], max_items, max_depth)
+        contents, truncated, first_level, walked = scan_tree(disk, item["path"], max_items, max_depth)
         verdict = cls.classify_folder(item, contents, rules, lang)
         record = dict(item)
         record["verdict"] = verdict.as_dict()
         record["scanned"] = len(contents)
         record["truncated"] = truncated
+        record["size"] = verdict.size
+        record["files"] = verdict.files
+        record["signature"] = cls.shallow_signature(first_level)
+        record["fingerprint"] = None if truncated else cls.tree_fingerprint(contents, item["path"])
+        # Folders sitting inside this one are fingerprinted from the same listing, which is
+        # how a pair of identical folders is found after a previous run tucked them away
+        # under a category.
+        record["nested"] = [] if truncated else nested_fingerprints(contents, walked)
         out.append(record)
     return out
 
 
-def scan_tree(disk: YandexDisk, path: str, max_items: int, max_depth: int) -> Tuple[List[Dict[str, Any]], bool]:
-    """Breadth-first listing of a folder, bounded so one huge folder cannot stall a run."""
+def find_duplicate_folders(disk: YandexDisk, records: List[Dict[str, Any]], deep: bool = False) -> List[Dict[str, Any]]:
+    """Find subfolders holding exactly the same thing, without scanning everything.
+
+    Comparing folders properly means knowing every file's checksum, and a full scan of
+    every folder would cost a request per two hundred files. Almost all folders are not
+    duplicates of anything, and any two that are must at least agree on what their
+    immediate children are called — which the classification pass already listed. So only
+    folders that collide on that cheap signature are scanned in full.
+    """
+    active = [r for r in records if not r["verdict"].get("skip")]
+
+    def rescan(record: Dict[str, Any]) -> None:
+        files, truncated, _, walked = scan_tree(disk, record["path"], max_items=0, max_depth=DEEP_SCAN_DEPTH)
+        record["full_scan"] = True
+        record["size"] = sum(int(f.get("size") or 0) for f in files)
+        record["files"] = len(files)
+        record["fingerprint"] = None if truncated else cls.tree_fingerprint(files, record["path"])
+        record["nested"] = [] if truncated else nested_fingerprints(files, walked)
+        if deep:
+            record["scanned_files"] = files
+
+    if deep:
+        # Everything gets read in full: the point of the deep pass is the files inside.
+        for record in active:
+            rescan(record)
+        return cls.find_duplicate_folders(active)
+
+    candidates: Dict[str, List[Dict[str, Any]]] = {}
+    for record in active:
+        candidates.setdefault(record.get("signature") or "", []).append(record)
+    groups = [g for g in candidates.values() if len(g) > 1]
+    for group in groups:
+        for record in group:
+            # A folder small enough to be scanned whole already has its fingerprint from the
+            # classification pass; only the ones cut short need reading again.
+            if record.get("fingerprint") is None:
+                rescan(record)
+    return cls.find_duplicate_folders([r for g in groups for r in g])
+
+
+def nested_fingerprints(files: List[Dict[str, Any]], walked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fingerprint every directory the scan walked into, from the files already listed."""
+    out = []
+    for directory in walked:
+        prefix = directory["path"] + "/"
+        inside = [f for f in files if str(f.get("path", "")).startswith(prefix)]
+        fingerprint = cls.tree_fingerprint(inside, directory["path"])
+        if not fingerprint:
+            continue
+        out.append({
+            "name": directory.get("name"),
+            "path": directory["path"],
+            "fingerprint": fingerprint,
+            "files": len(inside),
+            "size": sum(int(f.get("size") or 0) for f in inside),
+        })
+    return out
+
+
+def find_nested_duplicate_folders(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Identical folders found deeper in the tree. Reported, never moved.
+
+    They live inside somebody's folder, and rearranging what is inside a folder is not this
+    skill's business — but saying "these two hold the same 1.9 GB" is worth a lot.
+    """
+    everything = [n for record in records for n in (record.get("nested") or [])]
+    groups = cls.find_duplicate_folders(everything)
+    return [
+        {
+            "size": g["size"],
+            "files": g["files"],
+            "reclaimable": g["reclaimable"],
+            "keep": g["keep"]["path"],
+            "extra": [e["path"] for e in g["extra"]],
+        }
+        for g in groups
+    ]
+
+
+def find_inner_duplicates(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Duplicate files living inside the subfolders, for reporting only.
+
+    Nothing is moved out of a folder over this: the arrangement inside is the user's, and
+    the point here is to say how much space the same bytes occupy twice.
+    """
+    everything: List[Dict[str, Any]] = []
+    for record in records:
+        everything.extend(record.get("scanned_files") or [])
+    groups = cls.find_exact_duplicates(everything)
+    return [
+        {
+            "md5": g["md5"],
+            "size": g["size"],
+            "keep": g["keep"]["path"],
+            "extra": [e["path"] for e in g["extra"]],
+            "reclaimable": g["size"] * len(g["extra"]),
+        }
+        for g in groups
+    ]
+
+
+def scan_tree(disk: YandexDisk, path: str, max_items: int, max_depth: int) -> Tuple[List[Dict[str, Any]], bool, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Breadth-first listing of a folder, bounded so one huge folder cannot stall a run.
+
+    Also returns the immediate children — so the caller can build the cheap folder signature
+    without asking for the same listing twice — and every directory walked, so folders
+    nested inside can be compared as well. ``max_items`` of 0 means no cap.
+    """
     found: List[Dict[str, Any]] = []
+    first_level: List[Dict[str, Any]] = []
+    walked: List[Dict[str, Any]] = []
     queue = [(path, 0)]
     truncated = False
     while queue:
@@ -339,17 +471,28 @@ def scan_tree(disk: YandexDisk, path: str, max_items: int, max_depth: int) -> Tu
         except YandexDiskError:
             truncated = True
             continue
+        if depth == 0:
+            first_level = children
         for child in children:
-            if len(found) >= max_items:
-                return found, True
+            if max_items and len(found) >= max_items:
+                return found, True, first_level, walked
             if child.get("type") == "dir":
+                walked.append(child)
                 if depth + 1 < max_depth:
                     queue.append((child["path"], depth + 1))
                 else:
                     truncated = True
             else:
                 found.append(child)
-    return found, truncated
+    return found, truncated, first_level, walked
+
+
+def destination_names(rules: cls.Rules, lang: str) -> set:
+    """Top-level folder names the sorter uses as destinations, which it never moves."""
+    names = {cls.folder_for(cat, lang).split("/")[0] for cat in rules.categories}
+    names |= {cls.folder_for(rule, lang).split("/")[0] for rule in rules.name_rules if rule.get("folder")}
+    names.add(cls.special_folder(rules, "duplicates", lang))
+    return names
 
 
 def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
@@ -426,6 +569,37 @@ def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
             lines.append(f"  - keep `{md_escape(short(g['keep']))}`; copies: {extras} ({cls.human_size(g['size'])} each)")
         if len(dups) > 10:
             lines.append(f"  - ... and {len(dups) - 10} more group(s) in inventory.json")
+    dup_folders = inv.get("duplicate_folders") or []
+    if dup_folders:
+        notes += 1
+        reclaim = sum(g["reclaimable"] for g in dup_folders)
+        dup_folder_name = cls.special_folder(rules, "duplicates", lang)
+        lines.append(f"- Identical folders: {len(dup_folders)} group(s), {cls.human_size(reclaim)} held twice. "
+                     f"The plan keeps one of each and sends the copies to `{dup_folder_name}`.")
+        for g in dup_folders[:8]:
+            extras = ", ".join(f"`{md_escape(short(p))}`" for p in g["extra"])
+            lines.append(f"  - keep `{md_escape(short(g['keep']))}`; identical: {extras} "
+                         f"({g['files']} files, {cls.human_size(g['size'])} each)")
+    nested_dups = inv.get("nested_duplicate_folders") or []
+    if nested_dups:
+        notes += 1
+        reclaim = sum(g["reclaimable"] for g in nested_dups)
+        lines.append(f"- Identical folders nested inside others: {len(nested_dups)} group(s), "
+                     f"{cls.human_size(reclaim)} held twice. Only reported — what is inside a folder is left as it is.")
+        for g in nested_dups[:8]:
+            extras = ", ".join(f"`{md_escape(p)}`" for p in g["extra"])
+            lines.append(f"  - `{md_escape(g['keep'])}` ({g['files']} files, {cls.human_size(g['size'])}) is identical to {extras}")
+
+    inner = inv.get("inner_duplicates") or []
+    if inner:
+        notes += 1
+        reclaim = sum(g["reclaimable"] for g in inner)
+        lines.append(f"- Duplicate files inside the subfolders: {len(inner)} group(s), {cls.human_size(reclaim)} "
+                     "held twice. These are only reported — nothing is moved out of a folder.")
+        for g in inner[:5]:
+            lines.append(f"  - `{md_escape(short(g['keep']))}` ({cls.human_size(g['size'])}) also at: "
+                         + ", ".join(f"`{md_escape(p)}`" for p in g["extra"][:3]))
+
     looks = inv.get("lookalikes") or []
     if looks:
         notes += 1
@@ -453,10 +627,16 @@ def build_report(inv: Dict[str, Any], rules: cls.Rules) -> str:
         lines.append("")
         lines.append("| Folder | Files inside | Goes to | Why |")
         lines.append("|---|---:|---|---|")
+        protected = destination_names(rules, lang)
         for rec in folder_records[:SUMMARY_ROWS]:
             v = rec["verdict"]
-            destination = "stays" if v.get("skip") else f"`{md_escape(v['folder'])}`"
-            note = v["reason"] + (", listing truncated" if rec.get("truncated") else "")
+            if v.get("skip"):
+                destination, note = "stays", v["reason"]
+            elif rec.get("name") in protected:
+                destination, note = "stays", "already one of the sorting destinations"
+            else:
+                destination = f"`{md_escape(v['folder'])}`"
+                note = v["reason"] + (", listing truncated" if rec.get("truncated") else "")
             lines.append(f"| `{md_escape(rec['name'])}` | {v.get('files', 0)} | {destination} | {note} |")
         if len(folder_records) > SUMMARY_ROWS:
             lines.append(f"| ... and {len(folder_records) - SUMMARY_ROWS} more | | | full list in inventory.json |")
@@ -527,6 +707,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     dup_of: Dict[str, str] = {}
     if args.duplicates == "quarantine":
         for group in inv.get("duplicates") or []:
+            for extra in group["extra"]:
+                dup_of[extra] = short(group["keep"])
+        for group in inv.get("duplicate_folders") or []:
             for extra in group["extra"]:
                 dup_of[extra] = short(group["keep"])
     dup_folder = cls.special_folder(rules, "duplicates", lang)
@@ -604,12 +787,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     # happens to fill it. Otherwise a tidy folder would be moved into itself the moment a
     # run has nothing else to do: Документы -> Документы/Документы.
     target_folders = {normalize_path(p) for p in folders}
-    for cat in rules.categories:
-        target_folders.add(normalize_path(join_path(downloads, cls.folder_for(cat, lang))))
-    for rule in rules.name_rules:
-        if rule.get("folder"):
-            target_folders.add(normalize_path(join_path(downloads, cls.folder_for(rule, lang))))
-    target_folders.add(normalize_path(join_path(downloads, dup_folder)))
+    for name in destination_names(rules, lang):
+        target_folders.add(normalize_path(join_path(downloads, name)))
     for rec in inv.get("folders") or []:
         if not isinstance(rec, dict):
             continue  # inventory from an older run listed names only
@@ -621,7 +800,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if v.get("skip"):
             skipped.append({"path": source, "reason": v.get("reason", "left alone")})
             continue
-        folder = generic_folder if args.folders == "group" else v["folder"]
+        if source in dup_of:
+            folder = dup_folder
+            v = dict(v, reason=f"identical to {dup_of[source]}", category="duplicate")
+        else:
+            folder = generic_folder if args.folders == "group" else v["folder"]
         target_folder = join_path(downloads, folder)
         target = join_path(target_folder, name)
         if normalize_path(source) in target_folders or normalize_path(source) == normalize_path(target_folder):
@@ -1193,6 +1376,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.set_defaults(func=cmd_check)
 
     p_an = sub.add_parser("analyze", help="inventory the folder and print a report")
+    p_an.add_argument(
+        "--deep-duplicates",
+        action="store_true",
+        help="scan every subfolder in full to find duplicate files anywhere inside them, not just "
+             "loose ones (slower: one request per 200 files); duplicates inside folders are only reported",
+    )
     p_an.set_defaults(func=cmd_analyze)
 
     p_plan = sub.add_parser("plan", help="build plan.json from the inventory (no network)")
