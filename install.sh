@@ -4,16 +4,18 @@
 #
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/akinfold/yandex-disk-downloads-sort-skill/HEAD/install.sh)"
 #
-# It clones (or updates) the repository, links the skill into the places Claude Code,
+# It downloads the published skill archive from the latest GitHub release, checks it
+# against the SHA-256 the release ships, links the skill into the places Claude Code,
 # Codex, Cursor and other Agent Skills clients look, asks for a Yandex Disk OAuth token,
 # stores it in ~/.yandex-disk-token with owner-only permissions, and points Claude Code
-# at that file. Nothing is installed system-wide and no sudo is used.
+# at that file. No git, no sudo, nothing installed system-wide.
 #
 # Every step says what it is about to do, refuses to clobber anything it did not create,
 # and can be re-run safely.
 #
 # Environment variables (all optional):
-#   YADISK_SKILL_DIR    where to keep the checkout (default: ~/.local/share/yandex-disk-downloads-sort-skill)
+#   YADISK_SKILL_DIR    where to keep the skill (default: ~/.local/share/yandex-disk-downloads-sort)
+#   YADISK_VERSION      install a specific release tag, e.g. v1.0.0 (default: the latest)
 #   YANDEX_DISK_TOKEN   supply the token instead of being asked (for unattended installs)
 #   YADISK_TOKEN_FILE   where to write the token (default: ~/.yandex-disk-token)
 #   NONINTERACTIVE=1    never prompt; skip anything that would need an answer
@@ -39,7 +41,7 @@ TMPFILES=()
 cleanup() {
   # bash 3.2 treats "${empty[@]}" as an unbound variable under `set -u`, so check first.
   [ "${#TMPFILES[@]}" -gt 0 ] || return 0
-  rm -f "${TMPFILES[@]}"
+  rm -rf "${TMPFILES[@]}"
   TMPFILES=()
 }
 install_traps() {
@@ -53,13 +55,20 @@ install_traps
 # short, bash never reaches that line, so a partial script cannot half-install anything.
 main() {
   REPO_SLUG="akinfold/yandex-disk-downloads-sort-skill"
-  REPO_URL="https://github.com/${REPO_SLUG}.git"
   SKILL_NAME="yandex-disk-downloads-sort"
+  ARCHIVE="${SKILL_NAME}.tar.gz"
+  VERSION_WANTED="${YADISK_VERSION:-}"
+  if [ -n "${VERSION_WANTED}" ]; then
+    RELEASE_BASE="https://github.com/${REPO_SLUG}/releases/download/${VERSION_WANTED}"
+  else
+    RELEASE_BASE="https://github.com/${REPO_SLUG}/releases/latest/download"
+  fi
   POLIGON_URL="https://yandex.ru/dev/disk/poligon/"
   REVOKE_URL="https://id.yandex.ru/personal/data-access"
   API_URL="https://cloud-api.yandex.net/v1/disk"
 
-  SKILL_DIR="${YADISK_SKILL_DIR:-${HOME}/.local/share/yandex-disk-downloads-sort-skill}"
+  SKILL_DIR="${YADISK_SKILL_DIR:-${HOME}/.local/share/yandex-disk-downloads-sort}"
+  INSTALLED_VERSION="unknown"
   TOKEN_FILE="${YADISK_TOKEN_FILE:-${HOME}/.yandex-disk-token}"
   SETTINGS_FILE="${HOME}/.claude/settings.json"
   NONINTERACTIVE="${NONINTERACTIVE:-}"
@@ -78,7 +87,8 @@ main() {
   ${BOLD}yandex-disk-downloads-sort${RESET} — analyze and sort your Yandex Disk Downloads folder
 
   This installer will:
-    1. put a checkout of ${REPO_SLUG} in ${SKILL_DIR}
+    1. download the ${VERSION_WANTED:-latest} release of ${REPO_SLUG} into ${SKILL_DIR}
+       and check it against the SHA-256 published with it
     2. link the skill into ~/.claude/skills and ~/.agents/skills
     3. ask you for a Yandex Disk OAuth token and save it to ${TOKEN_FILE} (mode 600)
     4. point Claude Code at that file via ~/.claude/settings.json
@@ -89,7 +99,7 @@ main() {
 EOF
 
   check_prerequisites
-  fetch_repo
+  fetch_release
   link_skill "${HOME}/.claude/skills"
   link_skill "${HOME}/.agents/skills"
   install_token
@@ -121,9 +131,10 @@ Usage: install.sh [--help] [--no-token] [--no-settings] [--dir PATH]
   --help          show this message
   --no-token      install the skill but do not ask for or write a token
   --no-settings   do not add YANDEX_DISK_TOKEN_FILE to ~/.claude/settings.json
-  --dir PATH      keep the checkout at PATH (default ~/.local/share/yandex-disk-downloads-sort-skill)
+  --dir PATH      keep the skill at PATH (default ~/.local/share/yandex-disk-downloads-sort)
 
-Environment: YANDEX_DISK_TOKEN, YADISK_TOKEN_FILE, YADISK_SKILL_DIR, NONINTERACTIVE=1
+Environment: YANDEX_DISK_TOKEN, YADISK_TOKEN_FILE, YADISK_SKILL_DIR, YADISK_VERSION,
+             NONINTERACTIVE=1
 
 Through the one-liner, options go after an empty argument, which bash assigns to \$0:
 
@@ -172,15 +183,25 @@ check_prerequisites() {
 
   # On macOS /usr/bin/git is a stub that only prompts to install the Command Line Tools, so
   # ask git to actually do something rather than trusting that the path exists.
-  if ! git --version >/dev/null 2>&1; then
-    abort "git is required, and the git on your PATH does not run. On macOS: xcode-select --install"
-  fi
-  ok "git $(git --version 2>/dev/null | awk '{print $3}')"
-
   if ! curl --version >/dev/null 2>&1; then
     abort "curl is required, and the curl on your PATH does not run."
   fi
   ok "curl"
+
+  if ! tar --version >/dev/null 2>&1 && ! tar --help >/dev/null 2>&1; then
+    abort "tar is required, and the tar on your PATH does not run."
+  fi
+  ok "tar"
+
+  if have sha256sum; then
+    SHA_TOOL="sha256sum"
+  elif have shasum; then
+    SHA_TOOL="shasum -a 256"
+  else
+    SHA_TOOL=""
+    warn "no sha256sum or shasum found; the download cannot be checked against its published hash"
+  fi
+  [ -z "${SHA_TOOL}" ] || ok "checksums via ${SHA_TOOL}"
 
   if have python3 && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
     ok "python3 $(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null)"
@@ -189,34 +210,82 @@ check_prerequisites() {
   fi
 }
 
-# -- repository ---------------------------------------------------------------
+# -- the skill itself ---------------------------------------------------------
 
-fetch_repo() {
+fetch_release() {
   ohai "Fetching the skill"
-  if [ -d "${SKILL_DIR}/.git" ]; then
-    info "updating ${SKILL_DIR}"
-    if git -C "${SKILL_DIR}" pull --ff-only --quiet 2>/dev/null; then
-      ok "updated to $(git -C "${SKILL_DIR}" rev-parse --short HEAD)"
-    else
-      warn "could not fast-forward ${SKILL_DIR} (local changes?); using it as it is"
-    fi
-  elif [ -e "${SKILL_DIR}" ]; then
-    abort "${SKILL_DIR} exists but is not a git checkout. Move it aside, or pass --dir PATH."
-  else
-    info "cloning ${REPO_URL}"
-    mkdir -p "$(dirname "${SKILL_DIR}")" || abort "cannot create $(dirname "${SKILL_DIR}")"
-    if ! git clone --quiet --depth 1 "${REPO_URL}" "${SKILL_DIR}"; then
-      warn "clone failed; retrying once in 3 seconds"
-      rm -rf "${SKILL_DIR}"
-      sleep 3
-      git clone --quiet --depth 1 "${REPO_URL}" "${SKILL_DIR}" ||
-        abort "git clone failed. Check your network, or clone ${REPO_URL} by hand and re-run with --dir PATH."
-    fi
-    ok "cloned into ${SKILL_DIR}"
-  fi
 
-  SKILL_SOURCE="${SKILL_DIR}/skills/${SKILL_NAME}"
-  [ -f "${SKILL_SOURCE}/SKILL.md" ] || abort "${SKILL_SOURCE}/SKILL.md is missing — the checkout looks wrong."
+  archive_url="${RELEASE_BASE}/${ARCHIVE}"
+  work=$(mktemp -d "${TMPDIR:-/tmp}/yadisk-install.XXXXXXXX") || abort "cannot create a temp directory"
+  TMPFILES+=("${work}")
+
+  info "downloading ${archive_url}"
+  if ! curl -fsSL --retry 2 --retry-delay 2 --max-time 120 -o "${work}/${ARCHIVE}" "${archive_url}"; then
+    abort "could not download ${archive_url}
+    If the URL 404s, this repository may have no published release yet; see
+    https://github.com/${REPO_SLUG}/releases"
+  fi
+  ok "downloaded $(archive_size "${work}/${ARCHIVE}")"
+
+  verify_archive "${work}"
+  unpack_archive "${work}"
+
+  SKILL_SOURCE="${SKILL_DIR}/${SKILL_NAME}"
+  [ -f "${SKILL_SOURCE}/SKILL.md" ] || abort "${SKILL_SOURCE}/SKILL.md is missing — the archive looks wrong."
+  INSTALLED_VERSION=$(cat "${SKILL_SOURCE}/VERSION" 2>/dev/null || echo "unknown")
+  ok "installed version ${INSTALLED_VERSION} into ${SKILL_DIR}"
+}
+
+archive_size() {
+  size=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
+  case "${size}" in
+    ''|*[!0-9]*) printf 'the archive' ;;
+    *) printf '%s KB' "$((size / 1024))" ;;
+  esac
+}
+
+# A tarball fetched over the network gets unpacked into the user's home directory, so check
+# it against the hash published beside it rather than trusting the transfer.
+verify_archive() {
+  work="$1"
+  if [ -z "${SHA_TOOL}" ]; then
+    warn "skipping the checksum: no sha256 tool on this machine"
+    return 0
+  fi
+  if ! curl -fsSL --max-time 30 -o "${work}/${ARCHIVE}.sha256" "${RELEASE_BASE}/${ARCHIVE}.sha256"; then
+    warn "the release publishes no ${ARCHIVE}.sha256; continuing without verifying"
+    return 0
+  fi
+  published=$(awk '{print $1; exit}' "${work}/${ARCHIVE}.sha256")
+  actual=$(${SHA_TOOL} "${work}/${ARCHIVE}" | awk '{print $1; exit}')
+  if [ -z "${published}" ] || [ "${published}" != "${actual}" ]; then
+    abort "checksum mismatch for ${ARCHIVE}
+    published: ${published:-(none)}
+    actual:    ${actual}
+    Nothing was installed. Try again; if it keeps failing, report it at
+    https://github.com/${REPO_SLUG}/issues"
+  fi
+  ok "checksum matches (${actual})"
+}
+
+# Unpack beside the target and swap, so an interrupted extraction cannot leave a half-written
+# skill where the agent will look for one.
+unpack_archive() {
+  work="$1"
+  staged="${work}/unpacked"
+  mkdir -p "${staged}" || abort "cannot use ${staged}"
+  tar -xzf "${work}/${ARCHIVE}" -C "${staged}" || abort "could not unpack ${ARCHIVE}"
+  [ -d "${staged}/${SKILL_NAME}" ] || abort "the archive does not contain ${SKILL_NAME}/"
+
+  mkdir -p "${SKILL_DIR}" || abort "cannot create ${SKILL_DIR}"
+  target="${SKILL_DIR}/${SKILL_NAME}"
+  if [ -e "${target}" ]; then
+    previous=$(cat "${target}/VERSION" 2>/dev/null || echo "unknown")
+    info "replacing the copy already in ${SKILL_DIR} (version ${previous})"
+    retired="${work}/previous"
+    mv "${target}" "${retired}" || abort "cannot move the old copy out of ${target}"
+  fi
+  mv "${staged}/${SKILL_NAME}" "${target}" || abort "cannot move the new copy into ${target}"
 }
 
 # -- links --------------------------------------------------------------------
@@ -549,16 +618,21 @@ PY
       esac
     fi
   elif have jq; then
-    if [ "$(jq -r --arg f "${TOKEN_FILE}" '.env.YANDEX_DISK_TOKEN_FILE == $f' "${SETTINGS_FILE}" 2>/dev/null)" = "true" ]; then
+    if [ "$(jq -r --arg f "${TOKEN_FILE}" '.env.YANDEX_DISK_TOKEN_FILE == $f' "$(resolve_symlink "${SETTINGS_FILE}")" 2>/dev/null)" = "true" ]; then
       ok "already set in ${SETTINGS_FILE}"
       return 0
     fi
-    tmp="${SETTINGS_FILE}.tmp.$$"
+    # Rename onto the real file, never onto a symlink: a settings.json managed by stow or
+    # chezmoi is a link, and mv would replace the link instead of updating its target. The
+    # temp file lives beside that real file so the rename stays on one filesystem, and so
+    # stays atomic.
+    settings_real=$(resolve_symlink "${SETTINGS_FILE}")
+    tmp="${settings_real}.tmp.$$"
     if ( umask 077; jq --arg f "${TOKEN_FILE}" '.env = ((.env // {}) + {YANDEX_DISK_TOKEN_FILE: $f})' \
-        "${SETTINGS_FILE}" > "${tmp}" ) 2>/dev/null; then
-      copy_mode "${SETTINGS_FILE}" "${tmp}"
-      cp -p "${SETTINGS_FILE}" "${SETTINGS_FILE}.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null
-      mv "${tmp}" "${SETTINGS_FILE}" && ok "added env.YANDEX_DISK_TOKEN_FILE to ${SETTINGS_FILE}"
+        "${settings_real}" > "${tmp}" ) 2>/dev/null; then
+      copy_mode "${settings_real}" "${tmp}"
+      cp -p "${settings_real}" "${settings_real}.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null
+      mv "${tmp}" "${settings_real}" && ok "added env.YANDEX_DISK_TOKEN_FILE to ${SETTINGS_FILE}"
     else
       rm -f "${tmp}"
       warn "could not edit ${SETTINGS_FILE} automatically"
@@ -568,6 +642,21 @@ PY
     warn "neither python3 nor jq is available to edit ${SETTINGS_FILE}"
     print_settings_snippet
   fi
+}
+
+# readlink -f is GNU-only and arrived late on macOS, so walk the chain by hand.
+resolve_symlink() {
+  _f="$1"
+  _n=0
+  while [ -L "${_f}" ] && [ "${_n}" -lt 32 ]; do
+    _t=$(readlink "${_f}")
+    case "${_t}" in
+      /*) _f="${_t}" ;;
+      *) _f="$(dirname "${_f}")/${_t}" ;;
+    esac
+    _n=$((_n + 1))
+  done
+  printf '%s' "${_f}"
 }
 
 copy_mode() {
@@ -614,8 +703,9 @@ print_next_steps() {
   the one exception is "undo --remove-empty-folders", which sends folders it created itself,
   and only if they are empty, to the Disk's trash.
 
-  Docs:   https://github.com/${REPO_SLUG}
-  Update: re-run this installer, or git -C ${SKILL_DIR} pull
+  Installed: ${SKILL_NAME} ${INSTALLED_VERSION} in ${SKILL_DIR}
+  Docs:      https://github.com/${REPO_SLUG}
+  Update:    re-run this installer; it always fetches the latest release
 
 EOF
 }

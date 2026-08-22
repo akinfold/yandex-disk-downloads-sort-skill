@@ -46,15 +46,29 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/fakehome"
           env -i HOME="${RUNNER_TEMP}/fakehome" PATH="$PATH" NONINTERACTIVE=1 \
             bash install.sh --no-token < /dev/null
-          test -f "${RUNNER_TEMP}/fakehome/.local/share/yandex-disk-downloads-sort-skill/skills/yandex-disk-downloads-sort/SKILL.md"
+          skill="${RUNNER_TEMP}/fakehome/.local/share/yandex-disk-downloads-sort/yandex-disk-downloads-sort"
+          test -f "${skill}/SKILL.md"
+          test -f "${skill}/VERSION"
           test -L "${RUNNER_TEMP}/fakehome/.claude/skills/yandex-disk-downloads-sort"
           test -L "${RUNNER_TEMP}/fakehome/.agents/skills/yandex-disk-downloads-sort"
+          python3 "${skill}/scripts/downloads_sort.py" --help > /dev/null
           python3 -c "import json,os,sys; s=json.load(open(os.environ['RUNNER_TEMP']+'/fakehome/.claude/settings.json')); sys.exit(0 if s['env']['YANDEX_DISK_TOKEN_FILE'].endswith('.yandex-disk-token') else 1)"
       - name: Re-run is idempotent and writes a token file with mode 600
         run: |
           env -i HOME="${RUNNER_TEMP}/fakehome" PATH="$PATH" NONINTERACTIVE=1 \
             YANDEX_DISK_TOKEN=y0_not_a_real_token bash install.sh < /dev/null
-          test "$(stat -f '%Lp' "${RUNNER_TEMP}/fakehome/.yandex-disk-token" 2>/dev/null || stat -c '%a' "${RUNNER_TEMP}/fakehome/.yandex-disk-token")" = "600"
+          token="${RUNNER_TEMP}/fakehome/.yandex-disk-token"
+          # GNU first: on GNU coreutils `stat -f` means --file-system and would print
+          # filesystem details before failing, polluting the captured value.
+          mode=$(stat -L -c '%a' "${token}" 2>/dev/null || stat -L -f '%Lp' "${token}")
+          test "${mode}" = "600"
+      - name: An unusable release URL fails loudly instead of half-installing
+        run: |
+          mkdir -p "${RUNNER_TEMP}/emptyhome"
+          out=$(env -i HOME="${RUNNER_TEMP}/emptyhome" PATH="$PATH" NONINTERACTIVE=1 \
+            YADISK_VERSION=v0.0.0-does-not-exist bash install.sh --no-token < /dev/null 2>&1) && exit 1
+          echo "${out}" | grep -q "could not download"
+          test ! -e "${RUNNER_TEMP}/emptyhome/.claude/skills/yandex-disk-downloads-sort"
 
   openapi:
     name: Validate GPT action schema

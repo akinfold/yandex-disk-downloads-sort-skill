@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish, e.g. v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish the skill archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Work out the version
+        id: version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the version matches SKILL.md
+        run: |
+          declared=$(sed -n 's/^  version: "\(.*\)"$/\1/p' skills/yandex-disk-downloads-sort/SKILL.md)
+          if [ "${declared}" != "${{ steps.version.outputs.version }}" ]; then
+            echo "SKILL.md says version ${declared}, the tag says ${{ steps.version.outputs.version }}" >&2
+            exit 1
+          fi
+
+      - name: Run the tests the archive has to pass
+        run: python3 -m unittest discover -s tests
+
+      - name: Build the archive
+        run: |
+          set -eu
+          version="${{ steps.version.outputs.version }}"
+          staging=$(mktemp -d)
+          cp -R skills/yandex-disk-downloads-sort "${staging}/"
+          # Stamp the version so an installed copy can say what it is without the git history.
+          printf '%s\n' "${version}" > "${staging}/yandex-disk-downloads-sort/VERSION"
+          find "${staging}" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+          find "${staging}" -name '*.pyc' -delete 2>/dev/null || true
+          # A fixed asset name keeps the /releases/latest/download/ URL stable for the installer.
+          tar -czf yandex-disk-downloads-sort.tar.gz -C "${staging}" yandex-disk-downloads-sort
+          sha256sum yandex-disk-downloads-sort.tar.gz > yandex-disk-downloads-sort.tar.gz.sha256
+          # The same tree as a zip, for uploading to claude.ai as a custom skill.
+          (cd "${staging}" && zip -qr - yandex-disk-downloads-sort) > yandex-disk-downloads-sort.zip
+          ls -l yandex-disk-downloads-sort.*
+          cat yandex-disk-downloads-sort.tar.gz.sha256
+
+      - name: Verify the archive installs and runs
+        run: |
+          set -eu
+          probe=$(mktemp -d)
+          tar -xzf yandex-disk-downloads-sort.tar.gz -C "${probe}"
+          test -f "${probe}/yandex-disk-downloads-sort/SKILL.md"
+          test -f "${probe}/yandex-disk-downloads-sort/VERSION"
+          python3 "${probe}/yandex-disk-downloads-sort/scripts/downloads_sort.py" --help > /dev/null
+          python3 "${probe}/yandex-disk-downloads-sort/scripts/yadisk_api.py" --help > /dev/null
+          python3 -c "import json; json.load(open('${probe}/yandex-disk-downloads-sort/assets/rules.default.json'))"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          cat > notes.md <<'NOTES'
+          Install or update:
+
+          ```bash
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/REPO_SLUG/HEAD/install.sh)"
+          ```
+
+          The installer downloads `yandex-disk-downloads-sort.tar.gz` from this release and
+          checks it against `yandex-disk-downloads-sort.tar.gz.sha256`, so it never needs git.
+          `yandex-disk-downloads-sort.zip` is the same skill packaged for uploading to claude.ai.
+          NOTES
+          sed -i "s#REPO_SLUG#${REPO}#" notes.md
+          assets="yandex-disk-downloads-sort.tar.gz yandex-disk-downloads-sort.tar.gz.sha256 yandex-disk-downloads-sort.zip"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release upload "${TAG}" ${assets} --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "${TAG}" ${assets} --title "${TAG}" --notes-file notes.md
+          fi
