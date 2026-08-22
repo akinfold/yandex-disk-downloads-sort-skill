@@ -37,6 +37,9 @@ jobs:
       - name: Syntax check
         run: bash -n install.sh
       - name: ShellCheck
+        # Preinstalled on the Ubuntu runner; installing it on macOS would cost a minute
+        # for a check whose result cannot differ between the two.
+        if: runner.os == 'Linux'
         run: shellcheck -s bash install.sh
       - name: Install into a throwaway HOME, non-interactively
         run: |

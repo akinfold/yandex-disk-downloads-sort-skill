@@ -66,7 +66,9 @@ main() {
   [ -n "${CI:-}" ] && NONINTERACTIVE=1
 
   setup_output
-  [ -n "${HOME:-}" ] && [ -d "${HOME}" ] || abort "HOME is empty or not a directory; nothing can be installed."
+  if [ -z "${HOME:-}" ] || [ ! -d "${HOME}" ]; then
+    abort "HOME is empty or not a directory; nothing can be installed."
+  fi
   parse_args "$@"
   SKILL_DIR=$(absolute_path "${SKILL_DIR}")
   TOKEN_FILE=$(absolute_path "${TOKEN_FILE}")
@@ -133,7 +135,8 @@ EOF
 
 parse_args() {
   SKIP_TOKEN=""
-  [ -n "${YADISK_NO_SETTINGS:-}" ] && SKIP_SETTINGS=1 || SKIP_SETTINGS=""
+  SKIP_SETTINGS=""
+  [ -z "${YADISK_NO_SETTINGS:-}" ] || SKIP_SETTINGS=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --help|-h) usage; exit 0 ;;
